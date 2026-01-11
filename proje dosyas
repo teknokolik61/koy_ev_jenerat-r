@@ -28,7 +28,7 @@ const char* NVS_NS = "genctrl";
 // =====================
 // AUTH (Dynamic whitelist + names)
 // =====================
-const int MASTER_ADMIN_ID = 111111111; // SENİN Telegram numeric user_id (silinemez)
+const int MASTER_ADMIN_ID = 1253195249; // SENİN Telegram numeric user_id (silinemez)
 
 const int MAX_ALLOWED = 20;
 
