@@ -47,7 +47,7 @@ const char* NVS_NS = "genctrl";
 // Telegram poll
 // =====================
 unsigned long lastBotPollMs = 0;
-const unsigned long BOT_POLL_INTERVAL_MS = 800; // ✅
+const unsigned long BOT_POLL_INTERVAL_MS = 800;
 
 // =====================
 // Pins
@@ -123,8 +123,8 @@ int genBelowCount = 0;
 // =====================
 // RMS sampling (optimize)
 // =====================
-const int RMS_SAMPLES = 300;         // ✅
-const int RMS_SAMPLE_DELAY_US = 100; // ✅
+const int RMS_SAMPLES = 300;
+const int RMS_SAMPLE_DELAY_US = 100;
 
 float CAL_MAINS = 0.310;
 float CAL_GEN   = 0.310;
@@ -212,10 +212,7 @@ uint8_t lastRelayMask = 0;
 // AUTH (Dynamic whitelist + names)
 // =====================
 const int MAX_ALLOWED = 20;
-struct AllowedEntry {
-  long id;
-  String name;
-};
+struct AllowedEntry { long id; String name; };
 AllowedEntry allowedList[MAX_ALLOWED];
 int allowedCount = 0;
 
@@ -233,6 +230,17 @@ unsigned long tgOfflineSinceMs = 0;
 
 unsigned long lastWifiCheckMs = 0;
 bool lastWifiConnected = false;
+
+// =====================
+// Threshold UI pending (kaydet butonlu)
+// =====================
+bool thEditActive = false;
+bool thDirty = false;
+
+float P_OKMIN, P_OKMAX, P_HIGH, P_CRIT, P_GENRUN, P_HYST;
+float P_AUTOST, P_ASKLO, P_ASKHI;
+uint32_t P_REPSEC, P_CDSEC;
+float P_BCAL;
 
 // =====================
 // Forward decl
@@ -291,6 +299,18 @@ String buildOfflineReport(float mainsV, float genV);
 
 void wifiManagerTick();
 
+// Threshold UI
+void thInitPendingFromCurrent();
+void thDiscardPending();
+bool thValidatePending(String &err);
+void thCommitPendingToCurrent();
+
+void sendThresholdsMenu();
+void sendThresholdAdjust(const String& key);
+bool adjustThresholdPending(const String& key, float delta);
+float getThreshold(const String& key);
+String keyLabel(const String& key);
+
 // =====================
 // Helpers
 // =====================
@@ -321,7 +341,7 @@ String rssiToQuality(int rssi) {
 }
 
 // =====================
-// Relay write (persist)
+// Relay state NVS
 // =====================
 void saveRelayStateToNVS(uint8_t mask) {
   prefs.begin(NVS_NS, false);
@@ -354,7 +374,7 @@ void ign(bool on)     { relayWrite(PIN_IGN_RELAY, on); }
 void fuel(bool on)    { relayWrite(PIN_FUEL_RELAY, on); }
 
 // =====================
-// Telegram offline queue helpers
+// Telegram offline queue
 // =====================
 void tgQueuePush(const String& msg) {
   tgQueue[tgQHead] = msg;
@@ -364,7 +384,6 @@ void tgQueuePush(const String& msg) {
 
 String tgQueueDump() {
   if (tgQCount == 0) return "(yok)";
-
   String out = "";
   int start = tgQHead - tgQCount;
   if (start < 0) start += TG_Q_SIZE;
@@ -379,8 +398,7 @@ String tgQueueDump() {
 }
 
 void tgQueueClear() {
-  tgQHead = 0;
-  tgQCount = 0;
+  tgQHead = 0; tgQCount = 0;
   for (int i = 0; i < TG_Q_SIZE; i++) tgQueue[i] = "";
 }
 
@@ -439,6 +457,7 @@ void sendTG(const String& msg) {
 // InlineKeyboard
 // =====================
 void sendInlineMenu() {
+  // ✅ Defaults butonu kaldırıldı
   String kb =
     "["
       "["
@@ -462,7 +481,6 @@ void sendInlineMenu() {
         "{\"text\":\"🧊 Cooldown\",\"callback_data\":\"CMD:/get_cooldown\"}"
       "],"
       "["
-        "{\"text\":\"♻️ Defaults\",\"callback_data\":\"CMD:/defaults\"},"
         "{\"text\":\"👮 Liste\",\"callback_data\":\"CMD:/liste\"}"
       "]"
     "]";
@@ -495,7 +513,7 @@ void sendInlineYesNo(const String& reason, float v) {
 }
 
 // =====================
-// Allowed list ops
+// Allowed list
 // =====================
 int findAllowedIndex(long userId) {
   for (int i = 0; i < allowedCount; i++) if (allowedList[i].id == userId) return i;
@@ -567,8 +585,7 @@ void saveAllowedListToNVS() {
     o["id"] = (long long)allowedList[i].id;
     o["name"] = allowedList[i].name;
   }
-  String out;
-  serializeJson(doc, out);
+  String out; serializeJson(doc, out);
 
   prefs.begin(NVS_NS, false);
   prefs.putString("allow2", out);
@@ -577,7 +594,6 @@ void saveAllowedListToNVS() {
 
 void loadAllowedListFromNVS() {
   allowedCount = 0;
-
   prefs.begin(NVS_NS, true);
   String s = prefs.getString("allow2", "");
   prefs.end();
@@ -610,7 +626,6 @@ void saveThresholdsToNVS() {
   prefs.putFloat("crit", MAINS_CRITICAL_V);
   prefs.putFloat("genrun", GEN_RUNNING_V);
   prefs.putFloat("hyst", ALERT_HYST_V);
-
   prefs.putFloat("autost", AUTO_START_V);
   prefs.putFloat("asklo",  ASK_LOW_V);
   prefs.putFloat("askhi",  ASK_HIGH_V);
@@ -655,7 +670,6 @@ void setDefaultsAndSave() {
   MAINS_HIGH_ALERT_V = D_MAINS_HIGH_ALERT_V;
   MAINS_OK_MIN_V     = D_MAINS_OK_MIN_V;
   MAINS_OK_MAX_V     = D_MAINS_OK_MAX_V;
-
   MAINS_CRITICAL_V   = D_MAINS_CRITICAL_V;
   GEN_RUNNING_V      = D_GEN_RUNNING_V;
   ALERT_HYST_V       = D_ALERT_HYST_V;
@@ -796,7 +810,7 @@ void startProcedureBegin(const String& why) {
   // 🔋 Start öncesi akü kontrolü
   float vb = readBatteryV();
   battVlast = vb;
-  battVminCycle = vb; // döngü başında min'e set
+  battVminCycle = vb;
   if (vb < BATT_START_BLOCK_V) {
     lastAlarm = "🛑 Start iptal: Akü düşük (" + String(vb,2) + "V)";
     sendTG(lastAlarm + "\nLimit: " + String(BATT_START_BLOCK_V,1) + "V\nSebep: " + why);
@@ -826,6 +840,39 @@ void startProcedureBegin(const String& why) {
   state = ST_STARTING;
 }
 
+void updateGeneratorRunningDebounced(float genV) {
+  if (genV > GEN_RUNNING_V) { genAboveCount++; genBelowCount = 0; }
+  else { genBelowCount++; genAboveCount = 0; }
+
+  if (!generatorRunning && genAboveCount >= GEN_ON_CONFIRM_COUNT) {
+    generatorRunning = true;
+    lastPeriodicReportMs = millis();
+    sendTG("✅ Jeneratör çalışıyor (3/3 onay). (" + String(genV,1) + "V)");
+  }
+
+  if (generatorRunning && state == ST_MONITOR && genBelowCount >= GEN_OFF_CONFIRM_COUNT) {
+    generatorRunning = false;
+    stopScheduled = false;
+    mainsNormalSinceMs = 0;
+    sendTG("ℹ️ Jeneratör durdu (5/5 onay). (" + String(genV,1) + "V)");
+  }
+}
+
+void bootDetectGeneratorRunning() {
+  int hits = 0;
+  for (int i = 0; i < 3; i++) {
+    float g = readGenV();
+    if (g > GEN_RUNNING_V) hits++;
+    delay(150);
+  }
+  generatorRunning = (hits >= 2);
+  genAboveCount = generatorRunning ? GEN_ON_CONFIRM_COUNT : 0;
+  genBelowCount = generatorRunning ? 0 : GEN_OFF_CONFIRM_COUNT;
+}
+
+// =====================
+// MAINS return stop logic (TEK TANIM)
+// =====================
 void handleMainsReturnStopLogic(float mainsV) {
   bool mainsNormal = (mainsV >= MAINS_OK_MIN_V && mainsV <= MAINS_OK_MAX_V);
 
@@ -868,36 +915,6 @@ void handlePeriodicReport(float mainsV, float genV) {
     msg += "Auto: " + String(autoMode ? "ON" : "OFF");
     sendTG(msg);
   }
-}
-
-void updateGeneratorRunningDebounced(float genV) {
-  if (genV > GEN_RUNNING_V) { genAboveCount++; genBelowCount = 0; }
-  else { genBelowCount++; genAboveCount = 0; }
-
-  if (!generatorRunning && genAboveCount >= GEN_ON_CONFIRM_COUNT) {
-    generatorRunning = true;
-    lastPeriodicReportMs = millis();
-    sendTG("✅ Jeneratör çalışıyor (3/3 onay). (" + String(genV,1) + "V)");
-  }
-
-  if (generatorRunning && state == ST_MONITOR && genBelowCount >= GEN_OFF_CONFIRM_COUNT) {
-    generatorRunning = false;
-    stopScheduled = false;
-    mainsNormalSinceMs = 0;
-    sendTG("ℹ️ Jeneratör durdu (5/5 onay). (" + String(genV,1) + "V)");
-  }
-}
-
-void bootDetectGeneratorRunning() {
-  int hits = 0;
-  for (int i = 0; i < 3; i++) {
-    float g = readGenV();
-    if (g > GEN_RUNNING_V) hits++;
-    delay(150);
-  }
-  generatorRunning = (hits >= 2);
-  genAboveCount = generatorRunning ? GEN_ON_CONFIRM_COUNT : 0;
-  genBelowCount = generatorRunning ? 0 : GEN_OFF_CONFIRM_COUNT;
 }
 
 // =====================
@@ -1028,6 +1045,261 @@ void askGeneratorQuestion(const String& reason, float v) {
 }
 
 // =====================
+// Threshold UI helpers (pending)
+// =====================
+void thInitPendingFromCurrent() {
+  P_OKMIN = MAINS_OK_MIN_V;
+  P_OKMAX = MAINS_OK_MAX_V;
+  P_HIGH  = MAINS_HIGH_ALERT_V;
+  P_CRIT  = MAINS_CRITICAL_V;
+  P_GENRUN= GEN_RUNNING_V;
+  P_HYST  = ALERT_HYST_V;
+
+  P_AUTOST= AUTO_START_V;
+  P_ASKLO = ASK_LOW_V;
+  P_ASKHI = ASK_HIGH_V;
+
+  P_REPSEC = (uint32_t)(PERIODIC_REPORT_MS/1000UL);
+  P_CDSEC  = (uint32_t)COOLDOWN_SEC;
+
+  P_BCAL = BATT_CAL;
+
+  thEditActive = true;
+  thDirty = false;
+}
+
+void thDiscardPending() {
+  thEditActive = false;
+  thDirty = false;
+}
+
+bool thValidatePending(String &err) {
+  if (P_OKMIN >= P_OKMAX) { err = "❌ okmin okmax'tan küçük olmalı"; return false; }
+  if (P_ASKLO > P_ASKHI)  { err = "❌ ask_low ask_high'tan büyük olamaz"; return false; }
+  if (P_REPSEC < 10 || P_REPSEC > 3600) { err = "❌ report 10..3600 sn olmalı"; return false; }
+  if (P_CDSEC < 5 || P_CDSEC > 180) { err = "❌ cooldown 5..180 sn olmalı"; return false; }
+  if (P_BCAL < 0.80f || P_BCAL > 1.30f) { err = "❌ batt_cal 0.80..1.30 olmalı"; return false; }
+  return true;
+}
+
+void thCommitPendingToCurrent() {
+  MAINS_OK_MIN_V = P_OKMIN;
+  MAINS_OK_MAX_V = P_OKMAX;
+  MAINS_HIGH_ALERT_V = P_HIGH;
+  MAINS_CRITICAL_V = P_CRIT;
+  GEN_RUNNING_V = P_GENRUN;
+  ALERT_HYST_V = P_HYST;
+
+  AUTO_START_V = P_AUTOST;
+  ASK_LOW_V = P_ASKLO;
+  ASK_HIGH_V = P_ASKHI;
+
+  PERIODIC_REPORT_MS = (unsigned long)P_REPSEC * 1000UL;
+  COOLDOWN_SEC = P_CDSEC;
+
+  BATT_CAL = P_BCAL;
+
+  saveThresholdsToNVS();
+  saveReportSecToNVS(P_REPSEC);
+  saveCooldownSecToNVS(P_CDSEC);
+  saveBattCalToNVS(BATT_CAL);
+
+  thDirty = false;
+  thEditActive = false;
+}
+
+String keyLabel(const String& key) {
+  if (key == "okmin") return "✅ okmin";
+  if (key == "okmax") return "✅ okmax";
+  if (key == "high") return "⚠️ high";
+  if (key == "crit") return "🚨 critical";
+  if (key == "genrun") return "🧲 genrun";
+  if (key == "hyst") return "〰️ hyst";
+  if (key == "autost") return "🤖 auto_start";
+  if (key == "asklo") return "❓ ask_low";
+  if (key == "askhi") return "❓ ask_high";
+  if (key == "repsec") return "⏱ report(s)";
+  if (key == "cdsec") return "🧊 cooldown(s)";
+  if (key == "bcal") return "🔋 batt_cal";
+  return key;
+}
+
+float getThreshold(const String& key) {
+  if (thEditActive) {
+    if (key == "okmin")  return P_OKMIN;
+    if (key == "okmax")  return P_OKMAX;
+    if (key == "high")   return P_HIGH;
+    if (key == "crit")   return P_CRIT;
+    if (key == "genrun") return P_GENRUN;
+    if (key == "hyst")   return P_HYST;
+    if (key == "autost") return P_AUTOST;
+    if (key == "asklo")  return P_ASKLO;
+    if (key == "askhi")  return P_ASKHI;
+    if (key == "repsec") return (float)P_REPSEC;
+    if (key == "cdsec")  return (float)P_CDSEC;
+    if (key == "bcal")   return P_BCAL;
+  }
+  if (key == "okmin")  return MAINS_OK_MIN_V;
+  if (key == "okmax")  return MAINS_OK_MAX_V;
+  if (key == "high")   return MAINS_HIGH_ALERT_V;
+  if (key == "crit")   return MAINS_CRITICAL_V;
+  if (key == "genrun") return GEN_RUNNING_V;
+  if (key == "hyst")   return ALERT_HYST_V;
+  if (key == "autost") return AUTO_START_V;
+  if (key == "asklo")  return ASK_LOW_V;
+  if (key == "askhi")  return ASK_HIGH_V;
+  if (key == "repsec") return (float)(PERIODIC_REPORT_MS / 1000UL);
+  if (key == "cdsec")  return (float)COOLDOWN_SEC;
+  if (key == "bcal")   return BATT_CAL;
+  return 0;
+}
+
+bool adjustThresholdPending(const String& key, float delta) {
+  if (!thEditActive) thInitPendingFromCurrent();
+
+  if (key == "okmin")  { P_OKMIN += delta; if (P_OKMIN < 0) P_OKMIN = 0; if (P_OKMIN >= P_OKMAX) P_OKMIN = P_OKMAX - 1; thDirty = true; return true; }
+  if (key == "okmax")  { P_OKMAX += delta; if (P_OKMAX < P_OKMIN + 1) P_OKMAX = P_OKMIN + 1; thDirty = true; return true; }
+  if (key == "high")   { P_HIGH  += delta; if (P_HIGH < 0) P_HIGH = 0; thDirty = true; return true; }
+  if (key == "crit")   { P_CRIT  += delta; if (P_CRIT < 0) P_CRIT = 0; thDirty = true; return true; }
+  if (key == "genrun") { P_GENRUN+= delta; if (P_GENRUN < 0) P_GENRUN = 0; thDirty = true; return true; }
+  if (key == "hyst")   { P_HYST  += delta; if (P_HYST < 0) P_HYST = 0; thDirty = true; return true; }
+
+  if (key == "autost") { P_AUTOST+= delta; if (P_AUTOST < 0) P_AUTOST = 0; thDirty = true; return true; }
+  if (key == "asklo")  { P_ASKLO += delta; if (P_ASKLO > P_ASKHI) P_ASKLO = P_ASKHI; thDirty = true; return true; }
+  if (key == "askhi")  { P_ASKHI += delta; if (P_ASKHI < P_ASKLO) P_ASKHI = P_ASKLO; thDirty = true; return true; }
+
+  if (key == "repsec") {
+    long s = (long)P_REPSEC + (long)delta;
+    if (s < 10) s = 10;
+    if (s > 3600) s = 3600;
+    P_REPSEC = (uint32_t)s;
+    thDirty = true;
+    return true;
+  }
+
+  if (key == "cdsec") {
+    long s = (long)P_CDSEC + (long)delta;
+    if (s < 5) s = 5;
+    if (s > 180) s = 180;
+    P_CDSEC = (uint32_t)s;
+    thDirty = true;
+    return true;
+  }
+
+  if (key == "bcal") {
+    P_BCAL += delta;
+    if (P_BCAL < 0.80f) P_BCAL = 0.80f;
+    if (P_BCAL > 1.30f) P_BCAL = 1.30f;
+    thDirty = true;
+    return true;
+  }
+
+  return false;
+}
+
+void sendThresholdsMenu() {
+  if (!thEditActive) thInitPendingFromCurrent();
+
+  String kb =
+    "["
+      "["
+        "{\"text\":\"✅ okmin\",\"callback_data\":\"TH:okmin\"},"
+        "{\"text\":\"✅ okmax\",\"callback_data\":\"TH:okmax\"},"
+        "{\"text\":\"⚠️ high\",\"callback_data\":\"TH:high\"}"
+      "],"
+      "["
+        "{\"text\":\"🚨 critical\",\"callback_data\":\"TH:crit\"},"
+        "{\"text\":\"🧲 genrun\",\"callback_data\":\"TH:genrun\"},"
+        "{\"text\":\"〰️ hyst\",\"callback_data\":\"TH:hyst\"}"
+      "],"
+      "["
+        "{\"text\":\"🤖 auto_start\",\"callback_data\":\"TH:autost\"},"
+        "{\"text\":\"❓ ask_low\",\"callback_data\":\"TH:asklo\"},"
+        "{\"text\":\"❓ ask_high\",\"callback_data\":\"TH:askhi\"}"
+      "],"
+      "["
+        "{\"text\":\"⏱ report(s)\",\"callback_data\":\"TH:repsec\"},"
+        "{\"text\":\"🧊 cooldown(s)\",\"callback_data\":\"TH:cdsec\"},"
+        "{\"text\":\"🔋 batt_cal\",\"callback_data\":\"TH:bcal\"}"
+      "],"
+      "["
+        "{\"text\":\"♻️ Defaults\",\"callback_data\":\"THDEF\"},"
+        "{\"text\":\"💾 Kaydet\",\"callback_data\":\"THSAVE\"},"
+        "{\"text\":\"❌ İptal\",\"callback_data\":\"THCANCEL\"}"
+      "],"
+      "["
+        "{\"text\":\"📟 Status\",\"callback_data\":\"CMD:/status\"},"
+        "{\"text\":\"🧩 Menü\",\"callback_data\":\"CMD:/start\"}"
+      "]"
+    "]";
+
+  String msg = "⚙️ Thresholds menüsü\n";
+  msg += (thDirty ? "🟠 Değişiklik var (Kaydet bekliyor)\n\n" : "🟢 Değişiklik yok\n\n");
+
+  msg += "ok(" + String(P_OKMIN,0) + "-" + String(P_OKMAX,0) + ") ";
+  msg += "high " + String(P_HIGH,0) + " ";
+  msg += "crit " + String(P_CRIT,0) + "\n";
+  msg += "auto_start " + String(P_AUTOST,0) + " ask(" + String(P_ASKLO,0) + "-" + String(P_ASKHI,0) + ")\n";
+  msg += "genrun " + String(P_GENRUN,0) + " hyst " + String(P_HYST,1) + "\n";
+  msg += "report " + String(P_REPSEC) + "s cooldown " + String(P_CDSEC) + "s batt_cal " + String(P_BCAL,3);
+
+  bot.sendMessageWithInlineKeyboard(CHAT_ID, msg, "", kb);
+}
+
+void sendThresholdAdjust(const String& key) {
+  if (!thEditActive) thInitPendingFromCurrent();
+
+  float v = getThreshold(key);
+
+  String kb;
+  if (key == "bcal" || key == "hyst") {
+    kb =
+      "["
+        "["
+          "{\"text\":\"-0.10\",\"callback_data\":\"THA:" + key + ":-0.10\"},"
+          "{\"text\":\"-0.01\",\"callback_data\":\"THA:" + key + ":-0.01\"},"
+          "{\"text\":\"+0.01\",\"callback_data\":\"THA:" + key + ":+0.01\"},"
+          "{\"text\":\"+0.10\",\"callback_data\":\"THA:" + key + ":+0.10\"}"
+        "],"
+        "["
+          "{\"text\":\"⬅️ Geri\",\"callback_data\":\"THM\"},"
+          "{\"text\":\"📟 Status\",\"callback_data\":\"CMD:/status\"}"
+        "],"
+        "["
+          "{\"text\":\"♻️ Defaults\",\"callback_data\":\"THDEF\"},"
+          "{\"text\":\"💾 Kaydet\",\"callback_data\":\"THSAVE\"},"
+          "{\"text\":\"❌ İptal\",\"callback_data\":\"THCANCEL\"}"
+        "]"
+      "]";
+  } else {
+    kb =
+      "["
+        "["
+          "{\"text\":\"-10\",\"callback_data\":\"THA:" + key + ":-10\"},"
+          "{\"text\":\"-1\",\"callback_data\":\"THA:" + key + ":-1\"},"
+          "{\"text\":\"+1\",\"callback_data\":\"THA:" + key + ":+1\"},"
+          "{\"text\":\"+10\",\"callback_data\":\"THA:" + key + ":+10\"}"
+        "],"
+        "["
+          "{\"text\":\"⬅️ Geri\",\"callback_data\":\"THM\"},"
+          "{\"text\":\"🧩 Menü\",\"callback_data\":\"CMD:/start\"}"
+        "],"
+        "["
+          "{\"text\":\"♻️ Defaults\",\"callback_data\":\"THDEF\"},"
+          "{\"text\":\"💾 Kaydet\",\"callback_data\":\"THSAVE\"},"
+          "{\"text\":\"❌ İptal\",\"callback_data\":\"THCANCEL\"}"
+        "]"
+      "]";
+  }
+
+  String msg = "⚙️ Ayar: " + keyLabel(key) + "\n";
+  if (key == "bcal" || key == "hyst") msg += "Değer: " + String(v, 3) + "\n\n";
+  else msg += "Değer: " + String(v, 1) + "\n\n";
+  msg += "Butonlarla artır/azalt. (Kaydetmeden NVS yazılmaz)";
+  bot.sendMessageWithInlineKeyboard(CHAT_ID, msg, "", kb);
+}
+
+// =====================
 // Inline callback handler
 // =====================
 void handleInlineCallback(const String& data, const String& fromIdStr, const String& fromName) {
@@ -1044,6 +1316,75 @@ void handleInlineCallback(const String& data, const String& fromIdStr, const Str
     return;
   }
 
+  // Threshold menu
+  if (data == "THM") { sendThresholdsMenu(); return; }
+
+  if (data.startsWith("TH:")) {
+    String key = data.substring(3);
+    sendThresholdAdjust(key);
+    return;
+  }
+
+  if (data.startsWith("THA:")) {
+    int p1 = data.indexOf(':', 4);
+    if (p1 > 0) {
+      String key = data.substring(4, p1);
+      String ds = data.substring(p1 + 1);
+      float delta = ds.toFloat();
+      if (adjustThresholdPending(key, delta)) sendThresholdAdjust(key);
+      else sendTG("❌ Bilinmeyen ayar: " + key);
+    }
+    return;
+  }
+
+  if (data == "THDEF") {
+    if (!thEditActive) thInitPendingFromCurrent();
+
+    P_OKMIN  = D_MAINS_OK_MIN_V;
+    P_OKMAX  = D_MAINS_OK_MAX_V;
+    P_HIGH   = D_MAINS_HIGH_ALERT_V;
+    P_CRIT   = D_MAINS_CRITICAL_V;
+    P_GENRUN = D_GEN_RUNNING_V;
+    P_HYST   = D_ALERT_HYST_V;
+
+    P_AUTOST = D_AUTO_START_V;
+    P_ASKLO  = D_ASK_LOW_V;
+    P_ASKHI  = D_ASK_HIGH_V;
+
+    P_REPSEC = 60;
+    P_CDSEC  = D_COOLDOWN_SEC;
+
+    P_BCAL   = 1.000f;
+
+    thDirty = true;
+    sendTG("♻️ Defaults yüklendi (kaydetmek için 💾 Kaydet).");
+    sendThresholdsMenu();
+    return;
+  }
+
+  if (data == "THSAVE") {
+    if (!thEditActive) thInitPendingFromCurrent();
+    String err;
+    if (!thValidatePending(err)) {
+      sendTG(err);
+      sendThresholdsMenu();
+      return;
+    }
+    thCommitPendingToCurrent();
+    sendTG("✅ Thresholds kaydedildi.");
+    sendThresholds();
+    sendThresholdsMenu();
+    return;
+  }
+
+  if (data == "THCANCEL") {
+    thDiscardPending();
+    sendTG("👍 Değişiklikler iptal edildi.");
+    sendThresholdsMenu();
+    return;
+  }
+
+  // Yes/No
   if (data == "ANS:EVET") {
     if (state == ST_WAIT_REPLY && awaitingReply) {
       awaitingReply = false;
@@ -1071,132 +1412,46 @@ void handleTelegramText(const String& text, const String& fromIdStr, const Strin
   long fromId = fromIdStr.toInt();
   String t = normalizeTR(text);
 
-  // herkese açık
-  if (t == "/myid") {
-    sendTG("🆔 " + fromName + " user_id: " + String(fromId));
-    return;
-  }
+  if (t == "/myid") { sendTG("🆔 " + fromName + " user_id: " + String(fromId)); return; }
 
-  // isim güncelle (yetkiliyse)
   if (isAllowedUser(fromId)) updateNameIfNeeded(fromId, fromName);
 
-  // yetkisiz
   if (!isAllowedUser(fromId)) {
-    if (t.startsWith("/")) {
-      sendTG("⛔ Yetkisiz komut. Kullanıcı: " + fromName + " (" + String(fromId) + ")");
-    }
+    if (t.startsWith("/")) sendTG("⛔ Yetkisiz komut. Kullanıcı: " + fromName + " (" + String(fromId) + ")");
     return;
   }
 
-  // Menü
-  if (t == "/start" || t == "/help" || t == "/komutlar" || t == "/commands") {
-    sendInlineMenu();
-    return;
-  }
+  if (t == "/start" || t == "/help" || t == "/komutlar" || t == "/commands") { sendInlineMenu(); return; }
 
-  // Alarm yanıtını yazıyla da kabul et
   if (state == ST_WAIT_REPLY && awaitingReply) {
-    if (t == "evet" || t == "e" || t == "yes") {
-      awaitingReply = false;
-      state = ST_PRECHECK_AFTER_YES;
-      sendTG("✅ Onay alındı. Şebeke tekrar kontrol ediliyor...");
-      return;
-    }
-    if (t == "hayır" || t == "hayir" || t == "h" || t == "no") {
-      awaitingReply = false;
-      state = ST_MONITOR;
-      sendTG("👍 Tamam. İşlem yapılmadı.");
-      sendInlineMenu();
-      return;
-    }
+    if (t == "evet" || t == "e" || t == "yes") { awaitingReply = false; state = ST_PRECHECK_AFTER_YES; sendTG("✅ Onay alındı. Şebeke tekrar kontrol ediliyor..."); return; }
+    if (t == "hayır" || t == "hayir" || t == "h" || t == "no") { awaitingReply = false; state = ST_MONITOR; sendTG("👍 Tamam. İşlem yapılmadı."); sendInlineMenu(); return; }
   }
 
-  // MASTER + yetkili komutlar
   if (t == "/liste") { sendTG(allowedListToString()); return; }
 
-  if (t.startsWith("/ekle")) {
-    if (!isMaster(fromId)) { sendTG("⛔ Bu komut sadece MASTER için."); return; }
-    int sp = text.indexOf(' ');
-    if (sp < 0) { sendTG("Kullanım: /ekle 123456789"); return; }
-    long id = text.substring(sp + 1).toInt();
-    if (id <= 0) { sendTG("❌ Geçersiz id."); return; }
-    if (!addAllowed(id)) { sendTG("❌ Liste dolu (max " + String(MAX_ALLOWED) + ")."); return; }
-    saveAllowedListToNVS();
-    sendTG("✅ Eklendi: " + String(id) + " (isim ilk mesajla eklenecek)");
-    return;
-  }
-
-  if (t.startsWith("/sil")) {
-    if (!isMaster(fromId)) { sendTG("⛔ Bu komut sadece MASTER için."); return; }
-    int sp = text.indexOf(' ');
-    if (sp < 0) { sendTG("Kullanım: /sil 123456789"); return; }
-    long id = text.substring(sp + 1).toInt();
-    if (id == MASTER_ADMIN_ID) { sendTG("❌ MASTER silinemez."); return; }
-    if (!removeAllowed(id)) { sendTG("ℹ️ Listede yok: " + String(id)); return; }
-    saveAllowedListToNVS();
-    sendTG("✅ Silindi: " + String(id));
-    return;
-  }
-
-  if (t.startsWith("/isim")) {
-    if (!isMaster(fromId)) { sendTG("⛔ Bu komut sadece MASTER için."); return; }
-    int firstSpace = text.indexOf(' ');
-    if (firstSpace < 0) { sendTG("Kullanım: /isim 123456789 Mehmet Yılmaz"); return; }
-    int secondSpace = text.indexOf(' ', firstSpace + 1);
-    if (secondSpace < 0) { sendTG("Kullanım: /isim 123456789 Mehmet Yılmaz"); return; }
-
-    long id = text.substring(firstSpace + 1, secondSpace).toInt();
-    if (id <= 0) { sendTG("❌ Geçersiz id."); return; }
-
-    String newName = text.substring(secondSpace + 1);
-    newName.trim();
-    if (newName.length() == 0) { sendTG("❌ İsim boş olamaz."); return; }
-
-    if (!setAllowedName(id, newName)) {
-      sendTG("❌ Bu ID listede yok veya master ID. Önce /ekle, sonra /isim.");
-      return;
-    }
-    sendTG("✅ İsim güncellendi: " + newName + " (" + String(id) + ")");
-    return;
-  }
-
-  // Normal komutlar
   if (t == "/status") { sendStatus(); return; }
-  if (t == "/battery") {
-    float vb = readBatteryV();
-    sendTG("🔋 Akü voltajı: " + String(vb, 2) + "V\nCal: " + String(BATT_CAL, 3));
-    return;
-  }
+  if (t == "/battery") { float vb = readBatteryV(); sendTG("🔋 Akü voltajı: " + String(vb, 2) + "V\nCal: " + String(BATT_CAL, 3)); return; }
 
   if (t.startsWith("/set_batt_cal")) {
     int sp = text.indexOf(' ');
     if (sp < 0) { sendTG("Kullanım: /set_batt_cal 1.033   (0.80..1.30)"); return; }
-
     float cal = text.substring(sp + 1).toFloat();
     if (cal < 0.80f) cal = 0.80f;
     if (cal > 1.30f) cal = 1.30f;
-
     BATT_CAL = cal;
     saveBattCalToNVS(BATT_CAL);
-
     float vb = readBatteryV();
-    sendTG("✅ BATT_CAL kaydedildi: " + String(BATT_CAL, 3) +
-           "\n🔋 Şu an akü: " + String(vb, 2) + "V");
+    sendTG("✅ BATT_CAL kaydedildi: " + String(BATT_CAL, 3) + "\n🔋 Şu an akü: " + String(vb, 2) + "V");
     return;
   }
 
-  if (t == "/get_thresholds") { sendThresholds(); return; }
+  if (t == "/get_thresholds") { sendThresholdsMenu(); return; }
+  if (t == "/dump_thresholds") { sendThresholds(); return; }
   if (t == "/stats") { sendStats(); return; }
 
-  if (t == "/get_report") {
-    sendTG("⏱️ Rapor süresi: " + String(PERIODIC_REPORT_MS/1000UL) + " sn");
-    return;
-  }
-
-  if (t == "/get_cooldown") {
-    sendTG("🧊 Cooldown süresi: " + String(COOLDOWN_SEC) + " sn");
-    return;
-  }
+  if (t == "/get_report") { sendTG("⏱️ Rapor süresi: " + String(PERIODIC_REPORT_MS/1000UL) + " sn"); return; }
+  if (t == "/get_cooldown") { sendTG("🧊 Cooldown süresi: " + String(COOLDOWN_SEC) + " sn"); return; }
 
   if (t.startsWith("/set_cooldown")) {
     int sp = text.indexOf(' ');
@@ -1216,6 +1471,7 @@ void handleTelegramText(const String& text, const String& fromIdStr, const Strin
   if (t == "/start_gen") { startProcedureBegin("manuel /start_gen"); return; }
   if (t == "/stop")  { stopGeneratorNow("manuel /stop"); state = ST_MONITOR; awaitingReply = false; return; }
 
+  // İstersen dursun (manuel yazınca hâlâ çalışır)
   if (t == "/defaults") { setDefaultsAndSave(); sendTG("♻️ Varsayılanlar yüklendi ve kaydedildi."); sendThresholds(); return; }
 
   if (t.startsWith("/set_report")) {
@@ -1227,55 +1483,6 @@ void handleTelegramText(const String& text, const String& fromIdStr, const Strin
     PERIODIC_REPORT_MS = (unsigned long)sec * 1000UL;
     saveReportSecToNVS(sec);
     sendTG("✅ Rapor süresi: " + String(sec) + " sn");
-    return;
-  }
-
-  if (t.startsWith("/set_thresholds")) {
-    float v; bool changed = false;
-    String tn = normalizeTR(text);
-    int idx = 0;
-
-    while (idx >= 0) {
-      int next = tn.indexOf(' ', idx);
-      String token = (next < 0) ? tn.substring(idx) : tn.substring(idx, next);
-      idx = (next < 0) ? -1 : next + 1;
-      if (token == "/set_thresholds") continue;
-
-      auto parseKV = [&](const String& key)->bool{
-        String prefix = key + "=";
-        if (!token.startsWith(prefix)) return false;
-        v = token.substring(prefix.length()).toFloat();
-        return true;
-      };
-
-      if (parseKV("high"))       { MAINS_HIGH_ALERT_V = v; changed = true; continue; }
-      if (parseKV("okmin"))      { MAINS_OK_MIN_V = v; changed = true; continue; }
-      if (parseKV("okmax"))      { MAINS_OK_MAX_V = v; changed = true; continue; }
-      if (parseKV("critical"))   { MAINS_CRITICAL_V = v; changed = true; continue; }
-      if (parseKV("genrun"))     { GEN_RUNNING_V = v; changed = true; continue; }
-      if (parseKV("hyst"))       { ALERT_HYST_V = v; changed = true; continue; }
-
-      if (parseKV("auto_start")) { AUTO_START_V = v; changed = true; continue; }
-      if (parseKV("ask_low"))    { ASK_LOW_V    = v; changed = true; continue; }
-      if (parseKV("ask_high"))   { ASK_HIGH_V   = v; changed = true; continue; }
-    }
-
-    if (!changed) {
-      sendTG("Kullanım: /set_thresholds okmin=210 okmax=230 high=240 critical=150 genrun=100 hyst=3 auto_start=100 ask_low=150 ask_high=200");
-      return;
-    }
-
-    if (ASK_LOW_V > ASK_HIGH_V) { float tmp = ASK_LOW_V; ASK_LOW_V = ASK_HIGH_V; ASK_HIGH_V = tmp; }
-    if (MAINS_OK_MIN_V >= MAINS_OK_MAX_V) {
-      sendTG("❌ Hata: okmin okmax'tan küçük olmalı. Değişiklik iptal.");
-      loadSettingsFromNVS();
-      return;
-    }
-    if (AUTO_START_V < 0) AUTO_START_V = 0;
-
-    saveThresholdsToNVS();
-    sendTG("✅ Thresholds kaydedildi.");
-    sendThresholds();
     return;
   }
 }
@@ -1294,7 +1501,7 @@ void checkTelegram() {
       if (bot.messages[i].chat_id != String(CHAT_ID)) continue;
 
       if (bot.messages[i].type == "callback_query") {
-        String data = bot.messages[i].text;
+        String data = bot.messages[i].text; // callback_data burada gelir
         handleInlineCallback(data, bot.messages[i].from_id, bot.messages[i].from_name);
         continue;
       }
@@ -1306,10 +1513,9 @@ void checkTelegram() {
 }
 
 // =====================
-// WiFi manager tick (30dk retry + online transition)
+// WiFi manager tick
 // =====================
 void wifiManagerTick() {
-  // 5sn'de bir durum kontrol
   if (millis() - lastWifiCheckMs >= 5000) {
     lastWifiCheckMs = millis();
     bool nowConnected = (WiFi.status() == WL_CONNECTED);
@@ -1321,7 +1527,6 @@ void wifiManagerTick() {
     lastWifiConnected = nowConnected;
   }
 
-  // 30dk bekleme modunda mı?
   if (wifiWaiting30Min) {
     if (millis() - wifiFailWaitStartMs >= WIFI_WAIT_30MIN_MS) {
       wifiWaiting30Min = false;
@@ -1341,7 +1546,6 @@ void wifiManagerTick() {
     }
   }
 }
-
 
 // =====================
 // setup / loop
@@ -1386,21 +1590,17 @@ void setup() {
   if (!wifiConnected) {
     wifiRestartCount++;
     if (wifiRestartCount <= WIFI_MAX_RESTART) {
-      Serial.println("\nWiFi yok, restart... (" + String(wifiRestartCount) + ")");
       delay(1000);
       ESP.restart();
     } else {
-      Serial.println("\nWiFi yok. Offline devam. 30dk sonra tekrar denenecek.");
       wifiWaiting30Min = true;
       wifiFailWaitStartMs = millis();
     }
   } else {
-    Serial.println("\nWiFi bağlı.");
     wifiRestartCount = 0;
     secured_client.setInsecure();
   }
 
-  // İlk ölçümler
   mainsV_cache = readMainsV();
   genV_cache   = readGenV();
   battVlast    = readBatteryV();
