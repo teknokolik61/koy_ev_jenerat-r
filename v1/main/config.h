@@ -1,15 +1,15 @@
 // =====================
-// config.h (v9.002 - LOW aktif röle + pinler ayarlı)
+// config.h (v9.004 - LOW aktif röle + FAULT exponential backoff)
 // =====================
 #pragma once
 #include <stdint.h>
 
-#include "sifre.h"   // WiFi/Telegram gizli bilgiler burada
+#include "sifre.h"
 
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v9.002"
+#define PROJECT_VERSION "v9.004"
 
 // =====================
 // Cihaz Adı
@@ -40,25 +40,23 @@ inline constexpr uint8_t PIN_ADC_GEN       = 35;
 inline constexpr uint8_t PIN_ADC_GEN_BATT  = 32;
 inline constexpr uint8_t PIN_ADC_CAM_BATT  = 33;
 
-// Save butonu (uzun bas: kaydet)
+// Save butonu
 inline constexpr uint8_t PIN_BTN_SAVE = 27;
 
 // =====================
 // Stage 9 - Relay Control (LOW aktif)
 // =====================
-// Donanım testine kadar 0 bırak (yanlışlıkla röle sürmesin).
+// Donanım testine kadar 0 bırak
 #define ENABLE_RELAY_CONTROL 0
 
-// Röle pinleri (senin için ayarlı)
-inline constexpr uint8_t PIN_RELAY_FUEL  = 23; // yakıt rölesi (motor çalışırken sürekli ON)
-inline constexpr uint8_t PIN_RELAY_START = 25; // marş rölesi (pulse)
-inline constexpr uint8_t PIN_RELAY_STOP  = 26; // stop rölesi (pulse)
+inline constexpr uint8_t PIN_RELAY_FUEL  = 23;
+inline constexpr uint8_t PIN_RELAY_START = 25;
+inline constexpr uint8_t PIN_RELAY_STOP  = 26;
 
-// Röleler LOW aktif:
+// Röleler LOW aktif
 inline constexpr uint8_t RELAY_ACTIVE_LEVEL = LOW;
 inline constexpr uint8_t RELAY_IDLE_LEVEL   = HIGH;
 
-// START ve STOP arasında küçük güvenlik boşluğu
 inline constexpr uint16_t RELAY_SAFE_GAP_MS = 80;
 
 // =====================
@@ -67,11 +65,9 @@ inline constexpr uint16_t RELAY_SAFE_GAP_MS = 80;
 inline constexpr uint16_t ADC_MAX  = 4095;
 inline constexpr float    ADC_VREF = 3.3f;
 
-// Divider oranları (örnek 120k / 33k)
 inline constexpr float GEN_BATT_DIV_RATIO = 4.63636f;
 inline constexpr float CAM_BATT_DIV_RATIO = 4.63636f;
 
-// AC sensör kalibrasyonları (ZMPT101B vb.)
 inline constexpr float CAL_MAINS = 240.0f;
 inline constexpr float CAL_GEN   = 240.0f;
 
@@ -128,24 +124,34 @@ inline constexpr uint32_t HOURS_SAVE_PERIOD_S   = 60;
 // =====================
 // Stage 9 - AUTO defaults
 // =====================
-inline constexpr float    AUTO_START_MAINS_V      = 160.0f; // şebeke < bu değer => oto start (confirm sonrası)
-inline constexpr uint16_t MAINS_FAIL_CONFIRM_S    = 15;     // sn
-inline constexpr uint16_t MAINS_RETURN_CONFIRM_S  = 20;     // sn
-inline constexpr uint16_t COOLDOWN_S              = 120;    // sn
+inline constexpr float    AUTO_START_MAINS_V      = 160.0f;
+inline constexpr uint16_t MAINS_FAIL_CONFIRM_S    = 15;
+inline constexpr uint16_t MAINS_RETURN_CONFIRM_S  = 20;
+inline constexpr uint16_t COOLDOWN_S              = 120;
 
 // =====================
 // Stage 9 - Start/Stop timing defaults
 // =====================
-inline constexpr uint16_t FUEL_PRIME_MS        = 1500;  // start öncesi yakıt prime
-inline constexpr uint16_t START_PULSE_MS       = 1200;  // marş pulse
-inline constexpr uint32_t START_RETRY_GAP_MS   = 3500;  // denemeler arası dinlenme
-inline constexpr uint16_t START_SENSE_GRACE_MS = 2500;  // marştan sonra genV yükselmesini bekle
-inline constexpr uint8_t  START_MAX_ATTEMPTS   = 3;     // max marş denemesi
+inline constexpr uint16_t FUEL_PRIME_MS        = 1500;
+inline constexpr uint16_t START_PULSE_MS       = 1200;
+inline constexpr uint32_t START_RETRY_GAP_MS   = 3500;
+inline constexpr uint16_t START_SENSE_GRACE_MS = 2500;
+inline constexpr uint8_t  START_MAX_ATTEMPTS   = 3;
 
-inline constexpr uint16_t STOP_PULSE_MS        = 900;   // stop pulse
-inline constexpr uint16_t STOP_VERIFY_S        = 8;     // stop sonrası doğrulama süresi
-inline constexpr uint8_t  STOP_MAX_ATTEMPTS    = 2;     // stop tekrar sayısı
-inline constexpr uint16_t FUEL_OFF_DELAY_MS    = 600;   // stop'tan sonra yakıtı kesme gecikmesi
+inline constexpr uint16_t STOP_PULSE_MS        = 900;
+inline constexpr uint16_t STOP_VERIFY_S        = 8;
+inline constexpr uint8_t  STOP_MAX_ATTEMPTS    = 2;
+inline constexpr uint16_t FUEL_OFF_DELAY_MS    = 600;
 
-// Auto start güvenliği: akü kritikse auto start yapma
+// =====================
+// Auto start güvenliği
+// =====================
 inline constexpr bool AUTO_BLOCK_ON_BATT_CRIT = true;
+
+// =====================
+// FAULT exponential backoff retry
+// =====================
+// Delay = BASE * 2^(retryCount), cap = MAX
+inline constexpr uint8_t  FAULT_MAX_RETRIES   = 3;     // kaç kez retry denesin
+inline constexpr uint16_t FAULT_RETRY_BASE_S  = 180;   // 3 dk (1. retry için)
+inline constexpr uint16_t FAULT_RETRY_MAX_S   = 1800;  // 30 dk cap (istersen büyüt)
