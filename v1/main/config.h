@@ -4,7 +4,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v2.001"
+#define PROJECT_VERSION "v3.001"
 
 // =====================
 // Serial
@@ -12,7 +12,7 @@
 inline constexpr uint32_t SERIAL_BAUD = 115200;
 
 // =====================
-// Feature Flags
+// Features
 // =====================
 #define USE_LCD 0
 #define USE_DATABASE 0
@@ -36,40 +36,52 @@ inline constexpr uint32_t TG_POLL_MS = 1200;
 inline constexpr const char* NVS_NAMESPACE = "koygen";
 
 // =====================
-// Pins (ESP32-WROOM-32D)
+// Pins
 // =====================
-inline constexpr uint8_t PIN_ADC_MAINS     = 34; // ZMPT101B (şebeke)
-inline constexpr uint8_t PIN_ADC_GEN       = 35; // ZMPT101B (jeneratör)
-inline constexpr uint8_t PIN_ADC_GEN_BATT  = 32; // divider (gen akü)
-inline constexpr uint8_t PIN_ADC_CAM_BATT  = 33; // divider (cam akü)
+inline constexpr uint8_t PIN_ADC_MAINS     = 34;
+inline constexpr uint8_t PIN_ADC_GEN       = 35;
+inline constexpr uint8_t PIN_ADC_GEN_BATT  = 32;
+inline constexpr uint8_t PIN_ADC_CAM_BATT  = 33;
 
-inline constexpr uint8_t PIN_BTN_SAVE = 27; // INPUT_PULLUP
+inline constexpr uint8_t PIN_BTN_SAVE = 27;
 
 // =====================
-// ADC & Ölçüm Ayarları
+// ADC & Ölçüm
 // =====================
 inline constexpr uint16_t ADC_MAX  = 4095;
 inline constexpr float    ADC_VREF = 3.3f;
 
-// Divider oranları
-inline constexpr float GEN_BATT_DIV_RATIO = 4.63636f; // 120k/33k örnek
+inline constexpr float GEN_BATT_DIV_RATIO = 4.63636f;
 inline constexpr float CAM_BATT_DIV_RATIO = 4.63636f;
 
-// ZMPT kalibrasyon başlangıç
 inline constexpr float CAL_MAINS = 240.0f;
 inline constexpr float CAL_GEN   = 240.0f;
 
-// Ölçüm periyotları
-inline constexpr uint32_t MEASURE_MS       = 1000;  // Aşama 2: daha sık ölç
+inline constexpr uint32_t MEASURE_MS       = 1000;
 inline constexpr uint32_t SERIAL_REPORT_MS = 2000;
 
 // =====================
-// Filtre ayarları
+// Filters
 // =====================
-// 0..1 arası: küçük -> daha yumuşak ama geç tepki
 inline constexpr float LPF_ALPHA_AC   = 0.15f;
 inline constexpr float LPF_ALPHA_BATT = 0.20f;
 
-// AC RMS örnek sayısı (50Hz için daha iyi stabilite)
-inline constexpr uint16_t AC_SAMPLES = 800; // ~160ms (delayMicroseconds 200 ile)
-inline constexpr uint16_t AC_US_DELAY = 200; // mikro saniye
+inline constexpr uint16_t AC_SAMPLES  = 800;
+inline constexpr uint16_t AC_US_DELAY = 200;
+
+// =====================
+// Aşama 3: Thresholds (varsayılan)
+// =====================
+inline constexpr float MAINS_HIGH_V     = 245.0f;
+inline constexpr float MAINS_NORMAL_MIN = 210.0f;
+inline constexpr float MAINS_NORMAL_MAX = 240.0f;
+inline constexpr float MAINS_LOW_V      = 200.0f;
+inline constexpr float MAINS_CRIT_V     = 150.0f;
+
+inline constexpr float GEN_OFF_V        = 50.0f;
+inline constexpr float GEN_LOW_V        = 190.0f;
+inline constexpr float GEN_NORMAL_MIN   = 210.0f;
+inline constexpr float GEN_NORMAL_MAX   = 240.0f;
+
+// Histerezis (geri dönüş bandı)
+inline constexpr float HYST_V = 5.0f;

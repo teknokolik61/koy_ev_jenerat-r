@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v2.001
+// SÜRÜM v3.001
 // =====================
 
 #include <Arduino.h>
@@ -23,33 +23,34 @@ enum RunMode : uint8_t { MODE_MANUAL = 0, MODE_AUTO = 1 };
 RunMode g_mode = MODE_MANUAL;
 
 struct Settings {
-  float calMains;
-  float calGen;
-  float genBattDiv;
-  float camBattDiv;
+  float calMains, calGen, genBattDiv, camBattDiv;
+
+  // Aşama 3 thresholds (NVS kalıcı)
+  float mainsHigh, mainsNormMin, mainsNormMax, mainsLow, mainsCrit;
+  float genOff, genLow, genNormMin, genNormMax;
+  float hystV;
 } g_set;
 
 struct Measurements {
-  float mainsV_raw;
-  float genV_raw;
-  float genBattV_raw;
-  float camBattV_raw;
-
-  float mainsV;     // filtreli
-  float genV;       // filtreli
-  float genBattV;   // filtreli
-  float camBattV;   // filtreli
-
-  int   wifiRssi;
+  float mainsV_raw, genV_raw, genBattV_raw, camBattV_raw;
+  float mainsV, genV, genBattV, camBattV;
+  int wifiRssi;
   uint32_t uptimeS;
 } g_meas;
 
-static uint32_t tMeasure = 0;
-static uint32_t tSerial  = 0;
-static uint32_t tTgPoll  = 0;
-
+static uint32_t tMeasure = 0, tSerial = 0, tTgPoll = 0;
 static bool lastBtn = true;
 static uint32_t btnDownMs = 0;
+
+enum class MainsState : uint8_t { UNKNOWN, CRITICAL, LOW, NORMAL, HIGH };
+enum class GenState   : uint8_t { UNKNOWN, OFF, LOW, NORMAL, HIGH };
+
+static MainsState g_mainsState = MainsState::UNKNOWN;
+static GenState   g_genState   = GenState::UNKNOWN;
+
+// latch: aynı state tekrar tekrar mesaj atmasın
+static bool g_mainsLatched = false;
+static bool g_genLatched   = false;
 
 // =====================
 // Helpers
@@ -74,6 +75,19 @@ static void loadSettings() {
   g_set.genBattDiv = prefs.getFloat("genDiv",   GEN_BATT_DIV_RATIO);
   g_set.camBattDiv = prefs.getFloat("camDiv",   CAM_BATT_DIV_RATIO);
 
+  g_set.mainsHigh    = prefs.getFloat("mHi",  MAINS_HIGH_V);
+  g_set.mainsNormMin = prefs.getFloat("mNmn", MAINS_NORMAL_MIN);
+  g_set.mainsNormMax = prefs.getFloat("mNmx", MAINS_NORMAL_MAX);
+  g_set.mainsLow     = prefs.getFloat("mLo",  MAINS_LOW_V);
+  g_set.mainsCrit    = prefs.getFloat("mCr",  MAINS_CRIT_V);
+
+  g_set.genOff       = prefs.getFloat("gOff", GEN_OFF_V);
+  g_set.genLow       = prefs.getFloat("gLo",  GEN_LOW_V);
+  g_set.genNormMin   = prefs.getFloat("gNmn", GEN_NORMAL_MIN);
+  g_set.genNormMax   = prefs.getFloat("gNmx", GEN_NORMAL_MAX);
+
+  g_set.hystV        = prefs.getFloat("hyst", HYST_V);
+
   g_mode = (RunMode)prefs.getUChar("mode", (uint8_t)MODE_MANUAL);
 }
 
@@ -82,6 +96,20 @@ static void saveSettings() {
   prefs.putFloat("calGen",   g_set.calGen);
   prefs.putFloat("genDiv",   g_set.genBattDiv);
   prefs.putFloat("camDiv",   g_set.camBattDiv);
+
+  prefs.putFloat("mHi",  g_set.mainsHigh);
+  prefs.putFloat("mNmn", g_set.mainsNormMin);
+  prefs.putFloat("mNmx", g_set.mainsNormMax);
+  prefs.putFloat("mLo",  g_set.mainsLow);
+  prefs.putFloat("mCr",  g_set.mainsCrit);
+
+  prefs.putFloat("gOff", g_set.genOff);
+  prefs.putFloat("gLo",  g_set.genLow);
+  prefs.putFloat("gNmn", g_set.genNormMin);
+  prefs.putFloat("gNmx", g_set.genNormMax);
+
+  prefs.putFloat("hyst", g_set.hystV);
+
   prefs.putUChar("mode", (uint8_t)g_mode);
 }
 
@@ -107,9 +135,7 @@ static float readAdcVoltage(uint8_t pin, uint16_t samples = 64) {
   return (adc / (float)ADC_MAX) * ADC_VREF;
 }
 
-// AC RMS ölçüm: offset + RMS (daha uzun pencere)
 static float readAcRmsApprox(uint8_t pin, float calScale) {
-  // mean
   uint32_t sum = 0;
   for (uint16_t i = 0; i < AC_SAMPLES; i++) {
     sum += analogRead(pin);
@@ -118,7 +144,6 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
   }
   float mean = (float)sum / (float)AC_SAMPLES;
 
-  // rms
   double sq = 0.0;
   for (uint16_t i = 0; i < AC_SAMPLES; i++) {
     float x = (float)analogRead(pin) - mean;
@@ -134,10 +159,28 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
   return vrms;
 }
 
-// UniversalTelegramBot sürümüne göre struct adı telegramMessage
 static bool isAuthorized(const telegramMessage& msg) {
   long fromId = msg.from_id.toInt();
   return (fromId == MASTER_ADMIN_ID);
+}
+
+static String mainsStateToText(MainsState st) {
+  switch (st) {
+    case MainsState::CRITICAL: return "CRITICAL";
+    case MainsState::LOW:      return "LOW";
+    case MainsState::NORMAL:   return "NORMAL";
+    case MainsState::HIGH:     return "HIGH";
+    default:                   return "UNKNOWN";
+  }
+}
+static String genStateToText(GenState st) {
+  switch (st) {
+    case GenState::OFF:    return "OFF";
+    case GenState::LOW:    return "LOW";
+    case GenState::NORMAL: return "NORMAL";
+    case GenState::HIGH:   return "HIGH";
+    default:               return "UNKNOWN";
+  }
 }
 
 static String buildStatusText() {
@@ -145,11 +188,11 @@ static String buildStatusText() {
   s += "📌 Köy Jeneratör Proje-3\n";
   s += String("🔖 Sürüm: ") + PROJECT_VERSION + "\n";
   s += String("⏱ Uptime: ") + String(g_meas.uptimeS) + " sn\n";
-  s += String("📶 WiFi RSSI: ") + String(g_meas.wifiRssi) + " dBm\n";
+  s += String("📶 RSSI: ") + String(g_meas.wifiRssi) + " dBm\n";
   s += String("⚙️ Mod: ") + (g_mode == MODE_AUTO ? "AUTO" : "MANUAL") + "\n\n";
 
-  s += "🔌 Şebeke (RMS~): " + fmt2(g_meas.mainsV) + " V\n";
-  s += "🟠 Jeneratör (RMS~): " + fmt2(g_meas.genV) + " V\n";
+  s += "🔌 Şebeke: " + fmt2(g_meas.mainsV) + " V (" + mainsStateToText(g_mainsState) + ")\n";
+  s += "🟠 Jeneratör: " + fmt2(g_meas.genV) + " V (" + genStateToText(g_genState) + ")\n";
   s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + " V\n";
   s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V\n";
   return s;
@@ -157,16 +200,112 @@ static String buildStatusText() {
 
 static String helpText() {
   String h;
-  h += "Komutlar (Aşama 2):\n";
+  h += "Komutlar (Aşama 3):\n";
   h += "/durum  -> ölçümler\n";
   h += "/auto   -> AUTO mod\n";
   h += "/manual -> MANUAL mod\n";
   h += "/save   -> ayarları NVS kaydet\n";
-  h += "/setcalmains <x>\n";
-  h += "/setcalgen <x>\n";
-  h += "/setgendiv <x>\n";
-  h += "/setcamdiv <x>\n";
   return h;
+}
+
+static void notify(const String& msg) {
+  if (WiFi.status() == WL_CONNECTED) {
+    bot.sendMessage(CHAT_ID, msg, "");
+  }
+}
+
+static MainsState evalMains(float v) {
+  // Histerezisli geçiş: state'e göre eşik kaydır
+  float h = g_set.hystV;
+
+  switch (g_mainsState) {
+    case MainsState::HIGH:
+      if (v <= g_set.mainsNormMax - h) return MainsState::NORMAL;
+      return MainsState::HIGH;
+
+    case MainsState::NORMAL:
+      if (v >= g_set.mainsHigh) return MainsState::HIGH;
+      if (v <  g_set.mainsCrit) return MainsState::CRITICAL;
+      if (v <  g_set.mainsLow)  return MainsState::LOW;
+      return MainsState::NORMAL;
+
+    case MainsState::LOW:
+      if (v >= g_set.mainsNormMin + h) return MainsState::NORMAL;
+      if (v <  g_set.mainsCrit)        return MainsState::CRITICAL;
+      return MainsState::LOW;
+
+    case MainsState::CRITICAL:
+      if (v >= g_set.mainsLow + h) return MainsState::LOW;
+      return MainsState::CRITICAL;
+
+    default:
+      // ilk kez
+      if (v >= g_set.mainsHigh) return MainsState::HIGH;
+      if (v <  g_set.mainsCrit) return MainsState::CRITICAL;
+      if (v <  g_set.mainsLow)  return MainsState::LOW;
+      return MainsState::NORMAL;
+  }
+}
+
+static GenState evalGen(float v) {
+  float h = g_set.hystV;
+
+  switch (g_genState) {
+    case GenState::OFF:
+      if (v >= g_set.genOff + h) return GenState::LOW;
+      return GenState::OFF;
+
+    case GenState::LOW:
+      if (v <  g_set.genOff)           return GenState::OFF;
+      if (v >= g_set.genNormMin + h)   return GenState::NORMAL;
+      return GenState::LOW;
+
+    case GenState::NORMAL:
+      if (v <  g_set.genOff)         return GenState::OFF;
+      if (v <  g_set.genLow)         return GenState::LOW;
+      if (v >  g_set.genNormMax)     return GenState::HIGH;
+      return GenState::NORMAL;
+
+    case GenState::HIGH:
+      if (v <= g_set.genNormMax - h) return GenState::NORMAL;
+      return GenState::HIGH;
+
+    default:
+      if (v < g_set.genOff) return GenState::OFF;
+      if (v < g_set.genLow) return GenState::LOW;
+      if (v > g_set.genNormMax) return GenState::HIGH;
+      return GenState::NORMAL;
+  }
+}
+
+static void handleStateNotifications() {
+  // mains
+  MainsState newM = evalMains(g_meas.mainsV);
+  if (newM != g_mainsState) {
+    g_mainsState = newM;
+    g_mainsLatched = false; // state değişti -> tekrar bildirim serbest
+  }
+  if (!g_mainsLatched) {
+    g_mainsLatched = true;
+    if (g_mainsState == MainsState::CRITICAL) notify("🚨 Şebeke KRİTİK: " + fmt2(g_meas.mainsV) + "V");
+    else if (g_mainsState == MainsState::LOW) notify("⚠️ Şebeke DÜŞÜK: " + fmt2(g_meas.mainsV) + "V");
+    else if (g_mainsState == MainsState::HIGH) notify("⚠️ Şebeke YÜKSEK: " + fmt2(g_meas.mainsV) + "V");
+    else if (g_mainsState == MainsState::NORMAL) notify("✅ Şebeke NORMAL: " + fmt2(g_meas.mainsV) + "V");
+  }
+
+  // gen
+  GenState newG = evalGen(g_meas.genV);
+  if (newG != g_genState) {
+    g_genState = newG;
+    g_genLatched = false;
+  }
+  if (!g_genLatched) {
+    g_genLatched = true;
+    if (g_genState == GenState::OFF) notify("⛔ Jeneratör OFF: " + fmt2(g_meas.genV) + "V");
+    else if (g_genState == GenState::LOW) notify("⚠️ Jeneratör DÜŞÜK: " + fmt2(g_meas.genV) + "V");
+    else if (g_genState == GenState::HIGH) notify("⚠️ Jeneratör YÜKSEK: " + fmt2(g_meas.genV) + "V");
+    else if (g_genState == GenState::NORMAL) notify("✅ Jeneratör NORMAL: " + fmt2(g_meas.genV) + "V");
+  }
 }
 
 static void handleTelegram() {
@@ -192,22 +331,6 @@ static void handleTelegram() {
       } else if (text == "/save") {
         saveSettings();
         bot.sendMessage(msg.chat_id, "✅ Ayarlar NVS'ye kaydedildi.", "");
-      } else if (text.startsWith("/setcalmains")) {
-        float v = text.substring(String("/setcalmains").length()).toFloat();
-        if (v > 0.01f) { g_set.calMains = v; bot.sendMessage(msg.chat_id, "✅ calMains = " + fmt2(v), ""); }
-        else bot.sendMessage(msg.chat_id, "❌ Geçersiz.", "");
-      } else if (text.startsWith("/setcalgen")) {
-        float v = text.substring(String("/setcalgen").length()).toFloat();
-        if (v > 0.01f) { g_set.calGen = v; bot.sendMessage(msg.chat_id, "✅ calGen = " + fmt2(v), ""); }
-        else bot.sendMessage(msg.chat_id, "❌ Geçersiz.", "");
-      } else if (text.startsWith("/setgendiv")) {
-        float v = text.substring(String("/setgendiv").length()).toFloat();
-        if (v > 1.0f) { g_set.genBattDiv = v; bot.sendMessage(msg.chat_id, "✅ genDiv = " + fmt2(v), ""); }
-        else bot.sendMessage(msg.chat_id, "❌ Geçersiz.", "");
-      } else if (text.startsWith("/setcamdiv")) {
-        float v = text.substring(String("/setcamdiv").length()).toFloat();
-        if (v > 1.0f) { g_set.camBattDiv = v; bot.sendMessage(msg.chat_id, "✅ camDiv = " + fmt2(v), ""); }
-        else bot.sendMessage(msg.chat_id, "❌ Geçersiz.", "");
       } else {
         bot.sendMessage(msg.chat_id, "Komut tanınmadı. /help yaz.", "");
       }
@@ -220,7 +343,6 @@ static void readAllMeasurements() {
   g_meas.wifiRssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
   g_meas.uptimeS  = millis() / 1000;
 
-  // Raw
   g_meas.mainsV_raw = readAcRmsApprox(PIN_ADC_MAINS, g_set.calMains);
   g_meas.genV_raw   = readAcRmsApprox(PIN_ADC_GEN,   g_set.calGen);
 
@@ -230,7 +352,6 @@ static void readAllMeasurements() {
   g_meas.genBattV_raw = vGenAdc * g_set.genBattDiv;
   g_meas.camBattV_raw = vCamAdc * g_set.camBattDiv;
 
-  // Filtered
   g_meas.mainsV   = lpf(g_meas.mainsV,   g_meas.mainsV_raw,   LPF_ALPHA_AC);
   g_meas.genV     = lpf(g_meas.genV,     g_meas.genV_raw,     LPF_ALPHA_AC);
   g_meas.genBattV = lpf(g_meas.genBattV, g_meas.genBattV_raw, LPF_ALPHA_BATT);
@@ -238,7 +359,7 @@ static void readAllMeasurements() {
 }
 
 static void handleSaveButton() {
-  bool btn = digitalRead(PIN_BTN_SAVE); // PULLUP: basılıyken LOW
+  bool btn = digitalRead(PIN_BTN_SAVE);
   uint32_t now = millis();
 
   if (lastBtn == true && btn == false) btnDownMs = now;
@@ -247,12 +368,9 @@ static void handleSaveButton() {
     uint32_t held = now - btnDownMs;
     if (held >= 800) {
       saveSettings();
-      if (WiFi.status() == WL_CONNECTED) {
-        bot.sendMessage(CHAT_ID, "💾 Buton: Ayarlar NVS'ye kaydedildi.", "");
-      }
+      notify("💾 Buton: Ayarlar NVS'ye kaydedildi.");
     }
   }
-
   lastBtn = btn;
 }
 
@@ -270,13 +388,10 @@ void setup() {
 
   loadSettings();
   connectWiFi();
-
   tgClient.setInsecure();
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("WiFi OK. IP: ");
-    Serial.println(WiFi.localIP());
-    bot.sendMessage(CHAT_ID, String("✅ Sistem açıldı. Sürüm: ") + PROJECT_VERSION, "");
+    notify(String("✅ Sistem açıldı. Sürüm: ") + PROJECT_VERSION);
   } else {
     Serial.println("WiFi BAGLANAMADI (15sn timeout).");
   }
@@ -302,35 +417,25 @@ void loop() {
   if (now - tMeasure >= MEASURE_MS) {
     tMeasure = now;
     readAllMeasurements();
+    handleStateNotifications(); // Aşama 3: bildirim motoru
   }
 
   if (now - tSerial >= SERIAL_REPORT_MS) {
     tSerial = now;
-
-    Serial.print("[");
-    Serial.print(PROJECT_VERSION);
-    Serial.print("] Mains~=");
-    Serial.print(fmt2(g_meas.mainsV));
-    Serial.print("V (raw ");
-    Serial.print(fmt2(g_meas.mainsV_raw));
-    Serial.print(")  Gen~=");
-    Serial.print(fmt2(g_meas.genV));
-    Serial.print("V (raw ");
-    Serial.print(fmt2(g_meas.genV_raw));
-    Serial.print(")  GenBatt=");
-    Serial.print(fmt2(g_meas.genBattV));
-    Serial.print("V  CamBatt=");
-    Serial.print(fmt2(g_meas.camBattV));
-    Serial.print("V  RSSI=");
-    Serial.print(g_meas.wifiRssi);
+    Serial.print("["); Serial.print(PROJECT_VERSION); Serial.print("] ");
+    Serial.print("Mains="); Serial.print(fmt2(g_meas.mainsV));
+    Serial.print(" ("); Serial.print(mainsStateToText(g_mainsState)); Serial.print(")");
+    Serial.print(" Gen="); Serial.print(fmt2(g_meas.genV));
+    Serial.print(" ("); Serial.print(genStateToText(g_genState)); Serial.print(")");
+    Serial.print(" GenBatt="); Serial.print(fmt2(g_meas.genBattV));
+    Serial.print(" CamBatt="); Serial.print(fmt2(g_meas.camBattV));
+    Serial.print(" RSSI="); Serial.print(g_meas.wifiRssi);
     Serial.println("dBm");
   }
 
   if (now - tTgPoll >= TG_POLL_MS) {
     tTgPoll = now;
-    if (WiFi.status() == WL_CONNECTED) {
-      handleTelegram();
-    }
+    if (WiFi.status() == WL_CONNECTED) handleTelegram();
   }
 
   delay(5);
