@@ -27,7 +27,7 @@ inline constexpr uint32_t SERIAL_BAUD = 115200;
 // =====================
 inline constexpr const char* WIFI_SSID = "Ozturk__Ailesi";
 inline constexpr const char* WIFI_PASS = "13052023Sm";
-inline constexpr const char* BOT_TOKEN = "7482070875:AAH1wntK1gK99Ami9VFyX79yAT_B6JG0f6g";
+inline constexpr const char* BOT_TOKEN = "8598948028:AAH1PwHyFO07aGwpcU5WR3nxNxOFVKVe8SU";
 inline constexpr const char* CHAT_ID   = "-1003432924253"; // grup chat id
 
 // Admin (riskli komutlar sadece buna izinli)
