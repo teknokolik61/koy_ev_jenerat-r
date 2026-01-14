@@ -20,14 +20,13 @@ inline constexpr uint32_t SERIAL_BAUD = 115200;
 // =====================
 // WiFi / Telegram
 // =====================
-inline constexpr const char* WIFI_SSID = "SSID_YAZ";
-inline constexpr const char* WIFI_PASS = "PASS_YAZ";
+inline constexpr const char* WIFI_SSID = "Ozturk__Ailesi";
+inline constexpr const char* WIFI_PASS = "13052023Sm";
+inline constexpr const char* BOT_TOKEN = "7482070875:AAH1wntK1gK99Ami9VFyX79yAT_B6JG0f6g";
+inline constexpr const char* CHAT_ID   = "-1003432924253"; // grup chat id
 
-inline constexpr const char* BOT_TOKEN = "123456:ABC..."; // Telegram bot token
-inline constexpr const char* CHAT_ID   = "123456789";     // Bildirim gidecek chat/grup id
-
-// Telegram user id (sayısal). Sadece bu kişi komut çalıştırır (Aşama 1)
-inline constexpr long MASTER_ADMIN_ID = 123456789;
+// Admin (riskli komutlar sadece buna izinli)
+inline constexpr long MASTER_ADMIN_ID = 1253195249; // kendi telegram user id
 
 // Telegram polling
 inline constexpr uint32_t TG_POLL_MS = 1200;
