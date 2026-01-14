@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v3.001
+// SÜRÜM v3.002
 // =====================
 
 #include <Arduino.h>
@@ -25,7 +25,6 @@ RunMode g_mode = MODE_MANUAL;
 struct Settings {
   float calMains, calGen, genBattDiv, camBattDiv;
 
-  // Aşama 3 thresholds (NVS kalıcı)
   float mainsHigh, mainsNormMin, mainsNormMax, mainsLow, mainsCrit;
   float genOff, genLow, genNormMin, genNormMax;
   float hystV;
@@ -48,7 +47,6 @@ enum class GenState   : uint8_t { UNKNOWN, OFF, LOW, NORMAL, HIGH };
 static MainsState g_mainsState = MainsState::UNKNOWN;
 static GenState   g_genState   = GenState::UNKNOWN;
 
-// latch: aynı state tekrar tekrar mesaj atmasın
 static bool g_mainsLatched = false;
 static bool g_genLatched   = false;
 
@@ -159,9 +157,14 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
   return vrms;
 }
 
+// UniversalTelegramBot sürümüne göre struct adı telegramMessage
 static bool isAuthorized(const telegramMessage& msg) {
   long fromId = msg.from_id.toInt();
   return (fromId == MASTER_ADMIN_ID);
+}
+
+static void notify(const String& msg) {
+  if (WiFi.status() == WL_CONNECTED) bot.sendMessage(CHAT_ID, msg, "");
 }
 
 static String mainsStateToText(MainsState st) {
@@ -208,14 +211,7 @@ static String helpText() {
   return h;
 }
 
-static void notify(const String& msg) {
-  if (WiFi.status() == WL_CONNECTED) {
-    bot.sendMessage(CHAT_ID, msg, "");
-  }
-}
-
 static MainsState evalMains(float v) {
-  // Histerezisli geçiş: state'e göre eşik kaydır
   float h = g_set.hystV;
 
   switch (g_mainsState) {
@@ -239,7 +235,6 @@ static MainsState evalMains(float v) {
       return MainsState::CRITICAL;
 
     default:
-      // ilk kez
       if (v >= g_set.mainsHigh) return MainsState::HIGH;
       if (v <  g_set.mainsCrit) return MainsState::CRITICAL;
       if (v <  g_set.mainsLow)  return MainsState::LOW;
@@ -256,14 +251,14 @@ static GenState evalGen(float v) {
       return GenState::OFF;
 
     case GenState::LOW:
-      if (v <  g_set.genOff)           return GenState::OFF;
-      if (v >= g_set.genNormMin + h)   return GenState::NORMAL;
+      if (v <  g_set.genOff)         return GenState::OFF;
+      if (v >= g_set.genNormMin + h) return GenState::NORMAL;
       return GenState::LOW;
 
     case GenState::NORMAL:
-      if (v <  g_set.genOff)         return GenState::OFF;
-      if (v <  g_set.genLow)         return GenState::LOW;
-      if (v >  g_set.genNormMax)     return GenState::HIGH;
+      if (v <  g_set.genOff)     return GenState::OFF;
+      if (v <  g_set.genLow)     return GenState::LOW;
+      if (v >  g_set.genNormMax) return GenState::HIGH;
       return GenState::NORMAL;
 
     case GenState::HIGH:
@@ -279,12 +274,8 @@ static GenState evalGen(float v) {
 }
 
 static void handleStateNotifications() {
-  // mains
   MainsState newM = evalMains(g_meas.mainsV);
-  if (newM != g_mainsState) {
-    g_mainsState = newM;
-    g_mainsLatched = false; // state değişti -> tekrar bildirim serbest
-  }
+  if (newM != g_mainsState) { g_mainsState = newM; g_mainsLatched = false; }
   if (!g_mainsLatched) {
     g_mainsLatched = true;
     if (g_mainsState == MainsState::CRITICAL) notify("🚨 Şebeke KRİTİK: " + fmt2(g_meas.mainsV) + "V");
@@ -293,12 +284,8 @@ static void handleStateNotifications() {
     else if (g_mainsState == MainsState::NORMAL) notify("✅ Şebeke NORMAL: " + fmt2(g_meas.mainsV) + "V");
   }
 
-  // gen
   GenState newG = evalGen(g_meas.genV);
-  if (newG != g_genState) {
-    g_genState = newG;
-    g_genLatched = false;
-  }
+  if (newG != g_genState) { g_genState = newG; g_genLatched = false; }
   if (!g_genLatched) {
     g_genLatched = true;
     if (g_genState == GenState::OFF) notify("⛔ Jeneratör OFF: " + fmt2(g_meas.genV) + "V");
@@ -309,8 +296,11 @@ static void handleStateNotifications() {
 }
 
 static void handleTelegram() {
+  // ✅ FIX: getUpdates() hata durumunda -1 dönebilir. while(numNew) KİLİTLER.
   int numNew = bot.getUpdates(bot.last_message_received + 1);
-  while (numNew) {
+  if (numNew <= 0) return;
+
+  while (numNew > 0) {
     for (int i = 0; i < numNew; i++) {
       telegramMessage& msg = bot.messages[i];
       if (!isAuthorized(msg)) continue;
@@ -335,7 +325,9 @@ static void handleTelegram() {
         bot.sendMessage(msg.chat_id, "Komut tanınmadı. /help yaz.", "");
       }
     }
+
     numNew = bot.getUpdates(bot.last_message_received + 1);
+    if (numNew <= 0) break; // ✅ FIX
   }
 }
 
@@ -388,6 +380,7 @@ void setup() {
 
   loadSettings();
   connectWiFi();
+
   tgClient.setInsecure();
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -417,7 +410,7 @@ void loop() {
   if (now - tMeasure >= MEASURE_MS) {
     tMeasure = now;
     readAllMeasurements();
-    handleStateNotifications(); // Aşama 3: bildirim motoru
+    handleStateNotifications();
   }
 
   if (now - tSerial >= SERIAL_REPORT_MS) {
