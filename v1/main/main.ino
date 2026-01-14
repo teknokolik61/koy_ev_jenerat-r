@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v5.001
+// SÜRÜM v5.002
 // =====================
 
 #include <Arduino.h>
@@ -71,9 +71,9 @@ static bool g_camBattLatched = false;
 // Stage 5 - Hours Counter
 // ---------------------
 static bool     g_genRunning = false;
-static uint16_t g_genRunStreakS = 0;      // kaç saniyedir üst üste çalışıyor
-static uint64_t g_genRunTotalS  = 0;      // toplam çalışma süresi (saniye)
-static uint32_t g_lastHoursSaveS = 0;     // son NVS yazma zamanı (uptime saniye)
+static uint16_t g_genRunStreakS = 0;
+static uint64_t g_genRunTotalS  = 0;
+static uint32_t g_lastHoursSaveS = 0;
 
 // =====================
 // Helpers
@@ -84,6 +84,7 @@ static String fmt2(float v) {
   dtostrf(v, 0, 2, b);
   return String(b);
 }
+
 static String fmtHMS(uint64_t totalS) {
   uint64_t h = totalS / 3600ULL;
   uint64_t m = (totalS % 3600ULL) / 60ULL;
@@ -100,6 +101,20 @@ static void notify(const String& msg) {
   if (WiFi.status() == WL_CONNECTED) bot.sendMessage(CHAT_ID, msg, "");
 }
 
+static void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(250);
+    yield();
+  }
+}
+
+// =====================
+// NVS
+// =====================
 static void loadSettings() {
   prefs.begin(NVS_NAMESPACE, false);
 
@@ -127,15 +142,12 @@ static void loadSettings() {
   g_set.hystAc       = prefs.getFloat("hAc",  HYST_V_AC);
   g_set.hystBatt     = prefs.getFloat("hBt",  HYST_V_BATT);
 
-  // Stage 5
   g_set.genRunningV      = prefs.getFloat("gRunV", GEN_RUNNING_V);
   g_set.genRunConfirmS   = prefs.getUShort("gRunC", GEN_RUNNING_CONFIRM_S);
   g_set.hoursSavePeriodS = prefs.getUInt("hSaveP", HOURS_SAVE_PERIOD_S);
 
   g_mode = (RunMode)prefs.getUChar("mode", (uint8_t)MODE_MANUAL);
 
-  // total hours load
-  // uint64_t yerine iki parça saklayalım (esp32 prefs 64-bit desteklese de garanti olsun)
   uint32_t lo = prefs.getUInt("hrsLo", 0);
   uint32_t hi = prefs.getUInt("hrsHi", 0);
   g_genRunTotalS = ((uint64_t)hi << 32) | (uint64_t)lo;
@@ -166,7 +178,6 @@ static void saveSettings() {
   prefs.putFloat("hAc",  g_set.hystAc);
   prefs.putFloat("hBt",  g_set.hystBatt);
 
-  // Stage 5
   prefs.putFloat("gRunV", g_set.genRunningV);
   prefs.putUShort("gRunC", g_set.genRunConfirmS);
   prefs.putUInt("hSaveP", g_set.hoursSavePeriodS);
@@ -181,17 +192,9 @@ static void saveHoursTotal() {
   prefs.putUInt("hrsHi", hi);
 }
 
-static void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(250);
-    yield();
-  }
-}
-
+// =====================
+// ADC Reads
+// =====================
 static float readAdcVoltage(uint8_t pin, uint16_t samples = 64) {
   uint32_t sum = 0;
   for (uint16_t i = 0; i < samples; i++) {
@@ -227,14 +230,9 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
   return vrms;
 }
 
-static bool isAuthorized(const telegramMessage& msg) {
-  long fromId = msg.from_id.toInt();
-  return (fromId == MASTER_ADMIN_ID);
-}
-
-// ---------------------
-// Battery state
-// ---------------------
+// =====================
+// Battery State
+// =====================
 static String battStateToText(BattState st) {
   switch (st) {
     case BattState::CRITICAL: return "CRITICAL";
@@ -252,22 +250,18 @@ static BattState evalBatt(float v, BattState prev) {
     case BattState::HIGH_V:
       if (v <= g_set.battHigh - h) return BattState::NORMAL;
       return BattState::HIGH_V;
-
     case BattState::NORMAL:
       if (v >= g_set.battHigh) return BattState::HIGH_V;
       if (v <  g_set.battCrit) return BattState::CRITICAL;
       if (v <  g_set.battLow)  return BattState::LOW_V;
       return BattState::NORMAL;
-
     case BattState::LOW_V:
       if (v >= g_set.battNormMin + h) return BattState::NORMAL;
       if (v <  g_set.battCrit)        return BattState::CRITICAL;
       return BattState::LOW_V;
-
     case BattState::CRITICAL:
       if (v >= g_set.battLow + h) return BattState::LOW_V;
       return BattState::CRITICAL;
-
     default:
       if (v >= g_set.battHigh) return BattState::HIGH_V;
       if (v <  g_set.battCrit) return BattState::CRITICAL;
@@ -298,14 +292,10 @@ static void handleBatteryNotifications() {
   }
 }
 
-// ---------------------
-// Stage 5 - running detect + total seconds
-// ---------------------
+// =====================
+// Stage 5 - Hours Counter
+// =====================
 static void updateGenHoursCounter() {
-  // genV burada okunmuyor ise, daha önceki aşamalarda okunduğunu varsaymak yerine:
-  // Bu sürümde genV ölçümünü de tekrar okuyacağız (tek yerden yönetmek daha doğru).
-  // Not: aşağıda readAllMeasurements() içinde genV okuyoruz.
-
   bool above = (g_meas.genV >= g_set.genRunningV);
 
   if (above) {
@@ -321,21 +311,25 @@ static void updateGenHoursCounter() {
   }
 
   if (g_genRunning) {
-    // her MEASURE_MS (1 sn) geldiğimizde +1 sn
     g_genRunTotalS += 1;
-
-    // voltaj düştüyse durdur
     if (!above) {
       g_genRunning = false;
       notify("⏹️ Jeneratör DURDU (sayaç durdu)");
     }
   }
 
-  // periyodik NVS kaydı
   if (g_meas.uptimeS - g_lastHoursSaveS >= g_set.hoursSavePeriodS) {
     g_lastHoursSaveS = g_meas.uptimeS;
     saveHoursTotal();
   }
+}
+
+// =====================
+// Telegram
+// =====================
+static bool isAuthorized(const telegramMessage& msg) {
+  long fromId = msg.from_id.toInt();
+  return (fromId == MASTER_ADMIN_ID);
 }
 
 static String buildStatusText() {
@@ -345,7 +339,8 @@ static String buildStatusText() {
   s += String("⏱ Uptime: ") + String(g_meas.uptimeS) + " sn\n";
   s += String("📶 RSSI: ") + String(g_meas.wifiRssi) + " dBm\n\n";
 
-  s += "🟠 Gen V: " + fmt2(g_meas.genV) + " V\n";
+  s += "🔌 Şebeke: " + fmt2(g_meas.mainsV) + " V\n";
+  s += "🟠 Jeneratör: " + fmt2(g_meas.genV) + " V\n";
   s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + " V (" + battStateToText(g_genBattState) + ")\n";
   s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V (" + battStateToText(g_camBattState) + ")\n\n";
 
@@ -387,14 +382,18 @@ static void handleTelegram() {
   }
 }
 
-// ---------------------
-// Measure (genV + batt)
-// ---------------------
+// =====================
+// Measure (MAINS + GEN + BATT)
+// =====================
 static void readAllMeasurements() {
   g_meas.wifiRssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
   g_meas.uptimeS  = millis() / 1000;
 
-  // GEN AC voltajı
+  // ✅ ŞEBEKE geri geldi
+  g_meas.mainsV_raw = readAcRmsApprox(PIN_ADC_MAINS, g_set.calMains);
+  g_meas.mainsV     = lpf(g_meas.mainsV, g_meas.mainsV_raw, LPF_ALPHA_AC);
+
+  // GEN
   g_meas.genV_raw = readAcRmsApprox(PIN_ADC_GEN, g_set.calGen);
   g_meas.genV     = lpf(g_meas.genV, g_meas.genV_raw, LPF_ALPHA_AC);
 
@@ -409,11 +408,11 @@ static void readAllMeasurements() {
   g_meas.camBattV = lpf(g_meas.camBattV, g_meas.camBattV_raw, LPF_ALPHA_BATT);
 }
 
-// ---------------------
+// =====================
 // Save Button
-// ---------------------
+// =====================
 static void handleSaveButton() {
-  bool btn = digitalRead(PIN_BTN_SAVE); // INPUT_PULLUP
+  bool btn = digitalRead(PIN_BTN_SAVE);
   uint32_t now = millis();
 
   if (lastBtn == true && btn == false) btnDownMs = now;
@@ -447,8 +446,7 @@ void setup() {
   tMeasure = millis();
   tSerial  = millis();
   tTgPoll  = millis();
-
-  g_lastHoursSaveS = g_meas.uptimeS;
+  g_lastHoursSaveS = 0;
 }
 
 void loop() {
@@ -466,19 +464,17 @@ void loop() {
 
   if (now - tMeasure >= MEASURE_MS) {
     tMeasure = now;
+
     readAllMeasurements();
-
-    // Aşama 4
     handleBatteryNotifications();
-
-    // Aşama 5
     updateGenHoursCounter();
   }
 
   if (now - tSerial >= SERIAL_REPORT_MS) {
     tSerial = now;
     Serial.print("["); Serial.print(PROJECT_VERSION); Serial.print("] ");
-    Serial.print("GenV="); Serial.print(fmt2(g_meas.genV));
+    Serial.print("Mains="); Serial.print(fmt2(g_meas.mainsV));
+    Serial.print(" Gen="); Serial.print(fmt2(g_meas.genV));
     Serial.print(" GenBatt="); Serial.print(fmt2(g_meas.genBattV));
     Serial.print(" CamBatt="); Serial.print(fmt2(g_meas.camBattV));
     Serial.print(" Run="); Serial.print(g_genRunning ? "YES" : "NO");

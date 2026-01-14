@@ -4,7 +4,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v5.001"
+#define PROJECT_VERSION "v5.002"
 
 // =====================
 // Serial
@@ -101,11 +101,6 @@ inline constexpr float HYST_V_BATT = 0.15f;
 // =====================
 // Stage 5 - Çalışma Saat Sayacı
 // =====================
-// Jeneratör "çalışıyor" sayılması için voltaj eşiği
-inline constexpr float GEN_RUNNING_V = 160.0f;
-
-// False trigger engeli: en az kaç saniye üst üste çalışıyor olmalı
+inline constexpr float   GEN_RUNNING_V          = 160.0f;
 inline constexpr uint16_t GEN_RUNNING_CONFIRM_S = 10;
-
-// NVS'ye çalışma süresi kaç saniyede bir yazılsın
-inline constexpr uint32_t HOURS_SAVE_PERIOD_S = 60;
+inline constexpr uint32_t HOURS_SAVE_PERIOD_S   = 60;
