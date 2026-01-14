@@ -1,7 +1,5 @@
 // =====================
 // main.ino (v10.003)
-// FIX: UiBtn/UiParamRef/UiCategory tipleri EN ÜSTE alındı.
-// Böylece "UiBtn was not declared" derleme hatası biter.
 // =====================
 
 #include <Arduino.h>
@@ -18,10 +16,15 @@
 #include "config.h"
 
 // =====================
-// -------- TYPE DEFINITIONS (MUST BE ABOVE ANY FUNCTION USE) --------
+// Globals
 // =====================
+Preferences prefs;
+
+WiFiClientSecure tgClient;
+UniversalTelegramBot bot(BOT_TOKEN, tgClient);
 
 enum RunMode : uint8_t { MODE_MANUAL = 0, MODE_AUTO = 1 };
+RunMode g_mode = MODE_MANUAL;
 
 struct Settings {
   float calMains, calGen, genBattDiv, camBattDiv;
@@ -34,15 +37,18 @@ struct Settings {
   float hystAc;
   float hystBatt;
 
-  float genRunningV;
+  // Hours
+  float    genRunningV;
   uint16_t genRunConfirmS;
   uint32_t hoursSavePeriodS;
 
+  // Auto
   float    autoStartMainsV;
   uint16_t mainsFailConfirmS;
   uint16_t mainsReturnConfirmS;
   uint16_t cooldownS;
 
+  // Timing
   uint16_t fuelPrimeMs;
   uint16_t startPulseMs;
   uint32_t startRetryGapMs;
@@ -54,172 +60,136 @@ struct Settings {
   uint8_t  stopMaxAttempts;
   uint16_t fuelOffDelayMs;
 
+  // Fault
   uint8_t  faultMaxRetries;
   uint16_t faultRetryBaseS;
   uint16_t faultRetryMaxS;
-};
+} g_set;
 
 struct Measurements {
   float mainsV_raw, genV_raw, genBattV_raw, camBattV_raw;
   float mainsV, genV, genBattV, camBattV;
   int wifiRssi;
   uint32_t uptimeS;
-};
+} g_meas;
 
-enum class BattState  : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
+static uint32_t tMeasure = 0, tSerial = 0, tTgPoll = 0, tUi = 0;
+
+// ---------------------
+// Battery State
+// ---------------------
+enum class BattState : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
+static BattState g_genBattState = BattState::UNKNOWN;
+static BattState g_camBattState = BattState::UNKNOWN;
+
+// ---------------------
+// Mains / Gen state
+// ---------------------
 enum class MainsState : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
 enum class GenState   : uint8_t { UNKNOWN, OFF,      LOW_V, NORMAL, HIGH_V };
 
-enum class AutoState : uint8_t {
-  IDLE, WAIT_FAIL_CONFIRM, STARTING, RUNNING, WAIT_RETURN_CONFIRM, COOLDOWN, STOPPING, FAULT
-};
-
-enum class StartSub : uint8_t { PRIME, CRANK, SENSE, REST };
-enum class StopSub  : uint8_t { PULSE, VERIFY };
-
-struct StartSeq {
-  bool active = false;
-  bool manual = false;
-  StartSub sub = StartSub::PRIME;
-  uint32_t untilMs = 0;
-  uint8_t attempt = 0;
-};
-
-struct StopSeq {
-  bool active = false;
-  bool manual = false;
-  StopSub sub = StopSub::PULSE;
-  uint32_t untilMs = 0;
-  uint8_t attempt = 0;
-  uint32_t fuelOffAtMs = 0;
-  uint32_t verifyDeadlineMs = 0;
-};
-
-// ---------- UI TYPES ----------
-enum class UiState : uint8_t { STATUS, MENU, SETTINGS, CONFIRM_EXIT };
-
-struct UiBtn {
-  uint8_t pin;
-  bool    stable;
-  bool    lastRead;
-  uint32_t lastChangeMs;
-
-  bool    pressedEvt;
-  bool    repeatEvt;
-  uint32_t downMs;
-  uint32_t lastRepeatMs;
-};
-
-enum class UiParamType : uint8_t { F32, U16, U32, U8 };
-
-struct UiParamRef {
-  const char* name;
-  UiParamType type;
-  void* ptr;
-  float step;
-  float stepFast;
-  float vMin;
-  float vMax;
-  const char* unit;
-};
-
-enum class UiCategory : uint8_t { MAINS, GEN, BATT, AUTO, TIMING, FAULT, CAL, COUNT };
-
-struct UiCatList {
-  UiCategory cat;
-  UiParamRef* list;
-  uint16_t count;
-};
-
-// =====================
-// -------- GLOBALS --------
-// =====================
-Preferences prefs;
-
-WiFiClientSecure tgClient;
-UniversalTelegramBot bot(BOT_TOKEN, tgClient);
-
-Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
-
-static RunMode g_mode = MODE_MANUAL;
-static Settings g_set;
-static Measurements g_meas;
-
-static uint32_t tMeasure = 0, tSerial = 0, tTgPoll = 0;
-
-// states
-static BattState  g_genBattState = BattState::UNKNOWN;
-static BattState  g_camBattState = BattState::UNKNOWN;
-
 static MainsState g_mainsState = MainsState::UNKNOWN;
 static GenState   g_genState   = GenState::UNKNOWN;
+
 static bool g_stateAlertsArmed = false;
 
-// hours counter
+// ---------------------
+// Hours Counter
+// ---------------------
 static bool     g_genRunning = false;
 static uint16_t g_genRunStreakS = 0;
 static uint64_t g_genRunTotalS  = 0;
 static uint32_t g_lastHoursSaveS = 0;
 
-// auto state machine
+// ---------------------
+// AUTO State
+// ---------------------
+enum class AutoState : uint8_t {
+  IDLE,
+  WAIT_FAIL_CONFIRM,
+  STARTING,
+  RUNNING,
+  WAIT_RETURN_CONFIRM,
+  COOLDOWN,
+  STOPPING,
+  FAULT
+};
 static AutoState g_autoState = AutoState::IDLE;
+
 static uint16_t g_failStreakS = 0;
 static uint16_t g_returnStreakS = 0;
 static uint16_t g_coolCounterS = 0;
 
+// FAULT runtime
 static uint16_t g_faultClearStreakS = 0;
 static uint8_t  g_faultRetryCount = 0;
 static uint32_t g_faultNextRetryS = 0;
 
-// relay states
+// ---------------------
+// Relay Control
+// ---------------------
 static bool g_fuelOn = false;
 static bool g_startOn = false;
 static bool g_stopOn  = false;
 
+// Pulse engine
 static bool g_pulseActive = false;
 static uint8_t g_pulsePin = 255;
 static uint32_t g_pulseUntilMs = 0;
 
-// sequences
-static StartSeq g_startSeq;
-static StopSeq  g_stopSeq;
-
-// ---------- UI globals ----------
-static UiState ui_state = UiState::STATUS;
-
-static uint8_t ui_statusPage = 0;   // 0..3
-static uint32_t ui_tRedraw = 0;
-
-static UiBtn ui_bLeft, ui_bRight, ui_bUp, ui_bDown, ui_bBack, ui_bOk;
-
-static uint8_t  ui_menuIndex = 0; // 0=Durum, 1=Ayarlar
-static uint8_t  ui_catIndex = 0;
-static uint16_t ui_paramIndex = 0;
-static bool     ui_editing = false;
-
-static Settings ui_snapshot;
-static bool     ui_dirty = false;
-static String   ui_changedSummary;
-
-static uint8_t  ui_confirmChoice = 1; // 0=Discard, 1=Save
-static float    ui_editOldValue = 0;
-static bool     ui_editOldValid = false;
+// =====================
+// TFT
+// =====================
+#if USE_TFT
+static SPIClass tftSPI(VSPI);
+static Adafruit_ILI9341 tft(&tftSPI, TFT_CS, TFT_DC, TFT_RST);
+static bool tftReady = false;
+#endif
 
 // =====================
-// -------- HELPERS --------
+// UI Types (IMPORTANT: must be BEFORE uiBtnInit etc.)
+// =====================
+enum class UiScreen : uint8_t { STATUS, MENU, SETTINGS, EDIT, CONFIRM };
+
+struct UiBtn {
+  uint8_t pin = 255;
+  bool lastRaw = true;
+  bool stable = true;
+  uint32_t lastChangeMs = 0;
+
+  bool pressedEvt = false;
+  bool repeatEvt  = false;
+
+  uint32_t downSinceMs = 0;
+  uint32_t nextRepeatMs = 0;
+};
+
+enum class UiCategory : uint8_t { MAINS, GEN, BATT, AUTO, TIMING, FAULT, CAL, COUNT };
+
+enum class UiParamType : uint8_t { F32, U16, U32, U8 };
+
+struct UiParamRef {
+  UiCategory cat;
+  const char* name;
+  UiParamType type;
+
+  void* ptr;           // points to g_set member
+  float minF, maxF;    // for float/u16/u32/u8 (min/max in float)
+  float stepF;         // base step (float)
+
+  const char* nvsKey;  // save key
+};
+
+struct UiCatList { UiParamRef* arr; uint8_t count; };
+
+// =====================
+// Helpers
 // =====================
 static String fmt2(float v) {
   if (isnan(v) || isinf(v)) return "nan";
-  char b[16];
+  char b[20];
   dtostrf(v, 0, 2, b);
   return String(b);
-}
-
-static String fmtHMS(uint64_t totalS) {
-  uint64_t h = totalS / 3600ULL;
-  uint64_t m = (totalS % 3600ULL) / 60ULL;
-  uint64_t s = totalS % 60ULL;
-  return String((unsigned long)h) + "h " + String((unsigned long)m) + "m " + String((unsigned long)s) + "s";
 }
 
 static String fmtDurTR(uint32_t sec) {
@@ -230,9 +200,31 @@ static String fmtDurTR(uint32_t sec) {
   return String(m) + "dk " + String(s) + "sn";
 }
 
+static String fmtHMS(uint64_t totalS) {
+  uint64_t h = totalS / 3600ULL;
+  uint64_t m = (totalS % 3600ULL) / 60ULL;
+  uint64_t s = totalS % 60ULL;
+  return String((unsigned long)h) + "h " + String((unsigned long)m) + "m " + String((unsigned long)s) + "s";
+}
+
 static float lpf(float prev, float x, float a) {
   if (isnan(prev) || isinf(prev)) return x;
   return prev + a * (x - prev);
+}
+
+static void notifyTo(const String& chatId, const String& msg) {
+  if (WiFi.status() == WL_CONNECTED) bot.sendMessage(chatId, msg, "");
+}
+static void notify(const String& msg) { notifyTo(String(CHAT_ID), msg); }
+
+static void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(250);
+    yield();
+  }
 }
 
 static const char* modeText(RunMode m) { return (m == MODE_AUTO) ? "AUTO" : "MANUAL"; }
@@ -251,49 +243,30 @@ static const char* autoStateText(AutoState st) {
   }
 }
 
-// Telegram parsing
-static String normalizeCommand(const String& textRaw) {
-  String t = textRaw;
-  t.trim();
-  int sp = t.indexOf(' ');
-  if (sp >= 0) t = t.substring(0, sp);
-  int at = t.indexOf('@');
-  if (at >= 0) t = t.substring(0, at);
-  t.toLowerCase();
-  return t;
+static uint32_t faultBackoffDelayS(uint8_t retryIndexFrom0) {
+  uint32_t base = (uint32_t)g_set.faultRetryBaseS;
+  uint8_t sh = retryIndexFrom0;
+  if (sh > 15) sh = 15;
+  uint32_t d = base << sh;
+  if (d > (uint32_t)g_set.faultRetryMaxS) d = (uint32_t)g_set.faultRetryMaxS;
+  return d;
 }
 
-static String getArg1(const String& textRaw) {
-  String t = textRaw;
-  t.trim();
-  int sp = t.indexOf(' ');
-  if (sp < 0) return "";
-  String a = t.substring(sp + 1);
-  a.trim();
-  return a;
-}
-
-static void notifyTo(const String& chatId, const String& msg) {
-  if (WiFi.status() == WL_CONNECTED) bot.sendMessage(chatId, msg, "");
-}
-static void notify(const String& msg) { notifyTo(String(CHAT_ID), msg); }
-
-// =====================
-// -------- WIFI --------
-// =====================
-static void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(250);
-    yield();
+static String buildBackoffPlanText(uint8_t alreadyTriedCount) {
+  if (alreadyTriedCount >= g_set.faultMaxRetries) return "Plan yok (limit doldu)";
+  String s;
+  uint8_t startIdx = alreadyTriedCount;
+  uint8_t endIdx = g_set.faultMaxRetries - 1;
+  for (uint8_t i = startIdx; i <= endIdx; i++) {
+    s += fmtDurTR(faultBackoffDelayS(i));
+    if (i != endIdx) s += " → ";
   }
+  if (g_set.faultRetryMaxS > 0) s += " (cap: " + fmtDurTR(g_set.faultRetryMaxS) + ")";
+  return s;
 }
 
 // =====================
-// -------- RELAYS --------
+// Relay
 // =====================
 static void relayWrite(uint8_t pin, bool on) {
 #if ENABLE_RELAY_CONTROL
@@ -380,7 +353,7 @@ static void relayPulseService() {
 }
 
 // =====================
-// -------- NVS --------
+// NVS
 // =====================
 static void loadSettings() {
   prefs.begin(NVS_NAMESPACE, false);
@@ -500,7 +473,7 @@ static void saveHoursTotal() {
 }
 
 // =====================
-// -------- ADC --------
+// ADC Reads
 // =====================
 static float readAdcVoltage(uint8_t pin, uint16_t samples = 64) {
   uint32_t sum = 0;
@@ -537,36 +510,16 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
   return vrms;
 }
 
-static void readAllMeasurements() {
-  g_meas.wifiRssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
-  g_meas.uptimeS  = millis() / 1000;
-
-  g_meas.mainsV_raw = readAcRmsApprox(PIN_ADC_MAINS, g_set.calMains);
-  g_meas.mainsV     = lpf(g_meas.mainsV, g_meas.mainsV_raw, LPF_ALPHA_AC);
-
-  g_meas.genV_raw = readAcRmsApprox(PIN_ADC_GEN, g_set.calGen);
-  g_meas.genV     = lpf(g_meas.genV, g_meas.genV_raw, LPF_ALPHA_AC);
-
-  float vGenAdc = readAdcVoltage(PIN_ADC_GEN_BATT);
-  float vCamAdc = readAdcVoltage(PIN_ADC_CAM_BATT);
-
-  g_meas.genBattV_raw = vGenAdc * g_set.genBattDiv;
-  g_meas.camBattV_raw = vCamAdc * g_set.camBattDiv;
-
-  g_meas.genBattV = lpf(g_meas.genBattV, g_meas.genBattV_raw, LPF_ALPHA_BATT);
-  g_meas.camBattV = lpf(g_meas.camBattV, g_meas.camBattV_raw, LPF_ALPHA_BATT);
-}
-
 // =====================
-// -------- STATE EVAL --------
+// Battery State
 // =====================
-static String battStateToText(BattState st) {
+static const char* battStateToText(BattState st) {
   switch (st) {
-    case BattState::CRITICAL: return "CRIT";
+    case BattState::CRITICAL: return "CRITICAL";
     case BattState::LOW_V:    return "LOW";
-    case BattState::NORMAL:   return "NORM";
+    case BattState::NORMAL:   return "NORMAL";
     case BattState::HIGH_V:   return "HIGH";
-    default:                  return "UNK";
+    default:                  return "UNKNOWN";
   }
 }
 
@@ -603,6 +556,29 @@ static BattState evalBatt(float v, BattState prev) {
 static void updateBatteryStatesOnly() {
   g_genBattState = evalBatt(g_meas.genBattV, g_genBattState);
   g_camBattState = evalBatt(g_meas.camBattV, g_camBattState);
+}
+
+// =====================
+// Mains/Gen state eval + Telegram
+// =====================
+static String mainsStateLine(MainsState st, float v) {
+  switch (st) {
+    case MainsState::CRITICAL: return "🚨 Şebeke KRİTİK: " + fmt2(v) + "V";
+    case MainsState::LOW_V:    return "⚠️ Şebeke DÜŞÜK: " + fmt2(v) + "V";
+    case MainsState::HIGH_V:   return "⚠️ Şebeke YÜKSEK: " + fmt2(v) + "V";
+    case MainsState::NORMAL:   return "✅ Şebeke NORMAL: " + fmt2(v) + "V";
+    default:                   return "ℹ️ Şebeke: " + fmt2(v) + "V";
+  }
+}
+
+static String genStateLine(GenState st, float v) {
+  switch (st) {
+    case GenState::OFF:     return "⛔ Jeneratör OFF: " + fmt2(v) + "V";
+    case GenState::LOW_V:   return "⚠️ Jeneratör DÜŞÜK: " + fmt2(v) + "V";
+    case GenState::HIGH_V:  return "⚠️ Jeneratör YÜKSEK: " + fmt2(v) + "V";
+    case GenState::NORMAL:  return "✅ Jeneratör NORMAL: " + fmt2(v) + "V";
+    default:                return "ℹ️ Jeneratör: " + fmt2(v) + "V";
+  }
 }
 
 static MainsState evalMains(float v, MainsState prev) {
@@ -663,39 +639,25 @@ static GenState evalGen(float v, GenState prev) {
   }
 }
 
-static String mainsStateLine(MainsState st, float v) {
-  switch (st) {
-    case MainsState::CRITICAL: return "🚨 Şebeke KRITIK: " + fmt2(v) + "V";
-    case MainsState::LOW_V:    return "⚠️ Şebeke DUSUK: " + fmt2(v) + "V";
-    case MainsState::HIGH_V:   return "⚠️ Şebeke YUKSEK: " + fmt2(v) + "V";
-    case MainsState::NORMAL:   return "✅ Şebeke NORMAL: " + fmt2(v) + "V";
-    default:                   return "ℹ️ Şebeke: " + fmt2(v) + "V";
-  }
-}
-
-static String genStateLine(GenState st, float v) {
-  switch (st) {
-    case GenState::OFF:     return "⛔ Jen OFF: " + fmt2(v) + "V";
-    case GenState::LOW_V:   return "⚠️ Jen DUSUK: " + fmt2(v) + "V";
-    case GenState::HIGH_V:  return "⚠️ Jen YUKSEK: " + fmt2(v) + "V";
-    case GenState::NORMAL:  return "✅ Jen NORMAL: " + fmt2(v) + "V";
-    default:                return "ℹ️ Jen: " + fmt2(v) + "V";
-  }
-}
-
 static void handleStateAlerts() {
   if (!ENABLE_TG_STATE_ALERTS) return;
   if (!g_stateAlertsArmed) return;
 
   MainsState nm = evalMains(g_meas.mainsV, g_mainsState);
-  if (nm != g_mainsState) { g_mainsState = nm; notify(mainsStateLine(g_mainsState, g_meas.mainsV)); }
+  if (nm != g_mainsState) {
+    g_mainsState = nm;
+    notify(mainsStateLine(g_mainsState, g_meas.mainsV));
+  }
 
   GenState ng = evalGen(g_meas.genV, g_genState);
-  if (ng != g_genState) { g_genState = ng; notify(genStateLine(g_genState, g_meas.genV)); }
+  if (ng != g_genState) {
+    g_genState = ng;
+    notify(genStateLine(g_genState, g_meas.genV));
+  }
 }
 
 // =====================
-// -------- HOURS COUNTER --------
+// Hours counter (1Hz)
 // =====================
 static bool isGenRunningNow() { return (g_meas.genV >= g_set.genRunningV); }
 
@@ -711,7 +673,7 @@ static void updateGenHoursCounter_1s() {
 
   if (!g_genRunning && g_genRunStreakS >= g_set.genRunConfirmS) {
     g_genRunning = true;
-    notify("▶️ Jeneratör ÇALISIYOR (sayaç başladı)");
+    notify("▶️ Jeneratör ÇALIŞIYOR (sayaç başladı)");
   }
 
   if (g_genRunning) {
@@ -729,8 +691,29 @@ static void updateGenHoursCounter_1s() {
 }
 
 // =====================
-// -------- START/STOP SEQ --------
+// Start/Stop sequences
 // =====================
+enum class StartSub : uint8_t { PRIME, CRANK, SENSE, REST };
+enum class StopSub  : uint8_t { PULSE, VERIFY };
+
+struct StartSeq {
+  bool active = false;
+  bool manual = false;
+  StartSub sub = StartSub::PRIME;
+  uint32_t untilMs = 0;
+  uint8_t attempt = 0;
+} g_startSeq;
+
+struct StopSeq {
+  bool active = false;
+  bool manual = false;
+  StopSub sub = StopSub::PULSE;
+  uint32_t untilMs = 0;
+  uint8_t attempt = 0;
+  uint32_t fuelOffAtMs = 0;
+  uint32_t verifyDeadlineMs = 0;
+} g_stopSeq;
+
 static bool autoStartBlockedByBatt() {
   if (!AUTO_BLOCK_ON_BATT_CRIT) return false;
   return (g_genBattState == BattState::CRITICAL);
@@ -834,43 +817,47 @@ static void stopSeqService() {
 }
 
 // =====================
-// -------- AUTO (1Hz) --------
+// AUTO logic (1Hz)
 // =====================
 static bool mainsIsBadForAuto() { return (g_meas.mainsV < g_set.autoStartMainsV); }
 static bool mainsIsGoodToStop() { return (g_meas.mainsV >= g_set.mainsNormMin && g_meas.mainsV <= g_set.mainsNormMax); }
 
-static uint32_t faultBackoffDelayS(uint8_t retryIndexFrom0) {
-  uint32_t base = (uint32_t)g_set.faultRetryBaseS;
-  uint8_t sh = retryIndexFrom0;
-  if (sh > 15) sh = 15;
-  uint32_t d = base << sh;
-  if (d > (uint32_t)g_set.faultRetryMaxS) d = (uint32_t)g_set.faultRetryMaxS;
-  return d;
-}
-
-static String buildBackoffPlanText(uint8_t alreadyTriedCount) {
-  if (alreadyTriedCount >= g_set.faultMaxRetries) return "Plan yok (limit doldu)";
-  String s;
-  uint8_t startIdx = alreadyTriedCount;
-  uint8_t endIdx = g_set.faultMaxRetries - 1;
-  for (uint8_t i = startIdx; i <= endIdx; i++) {
-    uint32_t d = faultBackoffDelayS(i);
-    s += fmtDurTR(d);
-    if (i != endIdx) s += " -> ";
-  }
-  if (g_set.faultRetryMaxS > 0) s += " (cap: " + fmtDurTR(g_set.faultRetryMaxS) + ")";
-  return s;
-}
-
 static void autoSetState(AutoState st, const String& reasonMsg = "") {
   if (st == g_autoState) return;
-  if (st == AutoState::FAULT) { g_faultClearStreakS = 0; g_faultNextRetryS = 0; }
-  if (g_autoState == AutoState::FAULT && st != AutoState::FAULT) {
-    g_faultClearStreakS = 0; g_faultRetryCount = 0; g_faultNextRetryS = 0;
+
+  if (st == AutoState::FAULT) {
+    g_faultClearStreakS = 0;
+    g_faultNextRetryS = 0;
   }
+  if (g_autoState == AutoState::FAULT && st != AutoState::FAULT) {
+    g_faultClearStreakS = 0;
+    g_faultRetryCount = 0;
+    g_faultNextRetryS = 0;
+  }
+
   g_autoState = st;
-  if (reasonMsg.length()) notify("🤖 AUTO: " + String(autoStateText(g_autoState)) + " — " + reasonMsg);
-  else notify("🤖 AUTO: " + String(autoStateText(g_autoState)));
+
+  if (reasonMsg.length())
+    notify("🤖 AUTO: " + String(autoStateText(g_autoState)) + " — " + reasonMsg);
+  else
+    notify("🤖 AUTO: " + String(autoStateText(g_autoState)));
+}
+
+static void autoFuelPolicy() {
+  if (g_mode != MODE_AUTO) return;
+
+  switch (g_autoState) {
+    case AutoState::STARTING:
+    case AutoState::RUNNING:
+    case AutoState::WAIT_RETURN_CONFIRM:
+    case AutoState::COOLDOWN:
+    case AutoState::STOPPING:
+      safeSetFuel(true);
+      break;
+    default:
+      safeSetFuel(false);
+      break;
+  }
 }
 
 static void enterFaultWithSchedule(const String& why) {
@@ -897,11 +884,17 @@ static void autoTick_1s() {
   if (g_mode != MODE_AUTO) {
     if (g_autoState != AutoState::IDLE) {
       g_autoState = AutoState::IDLE;
-      g_failStreakS = 0; g_returnStreakS = 0; g_coolCounterS = 0;
-      g_faultClearStreakS = 0; g_faultRetryCount = 0; g_faultNextRetryS = 0;
+      g_failStreakS = 0;
+      g_returnStreakS = 0;
+      g_coolCounterS = 0;
+      g_faultClearStreakS = 0;
+      g_faultRetryCount = 0;
+      g_faultNextRetryS = 0;
     }
     return;
   }
+
+  autoFuelPolicy();
 
   if (g_autoState == AutoState::FAULT) {
     if (mainsIsGoodToStop()) {
@@ -932,17 +925,21 @@ static void autoTick_1s() {
   }
 
   switch (g_autoState) {
-    case AutoState::IDLE:
-      g_failStreakS = 0; g_returnStreakS = 0; g_coolCounterS = 0;
+    case AutoState::IDLE: {
+      g_failStreakS = 0;
+      g_returnStreakS = 0;
+      g_coolCounterS = 0;
+
       if (!isGenRunningNow() && mainsIsBadForAuto()) {
         g_failStreakS = 1;
         autoSetState(AutoState::WAIT_FAIL_CONFIRM, "Şebeke düşük, doğrulama başladı");
       }
       break;
+    }
 
-    case AutoState::WAIT_FAIL_CONFIRM:
+    case AutoState::WAIT_FAIL_CONFIRM: {
       if (isGenRunningNow()) { autoSetState(AutoState::RUNNING, "Jeneratör zaten çalışıyor"); break; }
-      if (autoStartBlockedByBatt()) { enterFaultWithSchedule("Akü KRITIK, auto-start bloklandı"); break; }
+      if (autoStartBlockedByBatt()) { enterFaultWithSchedule("Akü KRİTİK, auto-start bloklandı"); break; }
 
       if (mainsIsBadForAuto()) {
         if (g_failStreakS < 65000) g_failStreakS++;
@@ -956,22 +953,25 @@ static void autoTick_1s() {
         startSeqBegin(false);
       }
       break;
+    }
 
-    case AutoState::STARTING:
+    case AutoState::STARTING: {
       if (!g_startSeq.active) {
         if (isGenRunningNow()) autoSetState(AutoState::RUNNING, "Start başarılı");
         else enterFaultWithSchedule("Start başarısız");
       }
       break;
+    }
 
-    case AutoState::RUNNING:
+    case AutoState::RUNNING: {
       if (mainsIsGoodToStop()) {
         g_returnStreakS = 1;
         autoSetState(AutoState::WAIT_RETURN_CONFIRM, "Şebeke normal, stop doğrulama");
       }
       break;
+    }
 
-    case AutoState::WAIT_RETURN_CONFIRM:
+    case AutoState::WAIT_RETURN_CONFIRM: {
       if (!isGenRunningNow()) { autoSetState(AutoState::IDLE, "Jeneratör durmuş"); break; }
 
       if (mainsIsGoodToStop()) {
@@ -986,14 +986,17 @@ static void autoTick_1s() {
         autoSetState(AutoState::COOLDOWN, "Cooldown başlıyor");
       }
       break;
+    }
 
-    case AutoState::COOLDOWN:
+    case AutoState::COOLDOWN: {
       if (!isGenRunningNow()) { autoSetState(AutoState::IDLE, "Cooldown bitmeden durmuş"); break; }
+
       if (mainsIsBadForAuto()) {
         g_coolCounterS = 0;
         autoSetState(AutoState::RUNNING, "Şebeke tekrar bozuldu (cooldown iptal)");
         break;
       }
+
       if (g_coolCounterS < 65000) g_coolCounterS++;
       if (g_coolCounterS >= g_set.cooldownS) {
         g_coolCounterS = 0;
@@ -1001,13 +1004,15 @@ static void autoTick_1s() {
         stopSeqBegin(false);
       }
       break;
+    }
 
-    case AutoState::STOPPING:
+    case AutoState::STOPPING: {
       if (!g_stopSeq.active) {
         if (!isGenRunningNow()) autoSetState(AutoState::IDLE, "Stop başarılı");
         else enterFaultWithSchedule("Stop başarısız (lockout)");
       }
       break;
+    }
 
     default:
       break;
@@ -1015,9 +1020,197 @@ static void autoTick_1s() {
 }
 
 // =====================
-// -------- UI MODEL (PARAM LISTS) --------
+// Measure
 // =====================
-static float uiParamGet(const UiParamRef& p) {
+static void readAllMeasurements() {
+  g_meas.wifiRssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
+  g_meas.uptimeS  = millis() / 1000;
+
+  g_meas.mainsV_raw = readAcRmsApprox(PIN_ADC_MAINS, g_set.calMains);
+  g_meas.mainsV     = lpf(g_meas.mainsV, g_meas.mainsV_raw, LPF_ALPHA_AC);
+
+  g_meas.genV_raw = readAcRmsApprox(PIN_ADC_GEN, g_set.calGen);
+  g_meas.genV     = lpf(g_meas.genV, g_meas.genV_raw, LPF_ALPHA_AC);
+
+  float vGenAdc = readAdcVoltage(PIN_ADC_GEN_BATT);
+  float vCamAdc = readAdcVoltage(PIN_ADC_CAM_BATT);
+
+  g_meas.genBattV_raw = vGenAdc * g_set.genBattDiv;
+  g_meas.camBattV_raw = vCamAdc * g_set.camBattDiv;
+
+  g_meas.genBattV = lpf(g_meas.genBattV, g_meas.genBattV_raw, LPF_ALPHA_BATT);
+  g_meas.camBattV = lpf(g_meas.camBattV, g_meas.camBattV_raw, LPF_ALPHA_BATT);
+}
+
+// =====================
+// UI Button engine
+// =====================
+static UiBtn ui_bLeft, ui_bRight, ui_bUp, ui_bDown, ui_bBack, ui_bOk;
+
+static void uiBtnInit(UiBtn& b, uint8_t pin) {
+  b.pin = pin;
+  pinMode(pin, INPUT_PULLUP);
+  b.lastRaw = digitalRead(pin);
+  b.stable  = b.lastRaw;
+  b.lastChangeMs = millis();
+  b.pressedEvt = b.repeatEvt = false;
+  b.downSinceMs = 0;
+  b.nextRepeatMs = 0;
+}
+
+static void uiBtnScanOne(UiBtn& b) {
+  b.pressedEvt = false;
+  b.repeatEvt  = false;
+
+  bool raw = digitalRead(b.pin);
+  uint32_t now = millis();
+
+  if (raw != b.lastRaw) {
+    b.lastRaw = raw;
+    b.lastChangeMs = now;
+  }
+
+  if ((now - b.lastChangeMs) >= UI_BTN_DEBOUNCE_MS) {
+    if (b.stable != raw) {
+      b.stable = raw;
+
+      // pressed (active low)
+      if (b.stable == false) {
+        b.pressedEvt = true;
+        b.downSinceMs = now;
+        b.nextRepeatMs = now + UI_BTN_REPEAT_DELAY_MS;
+      } else {
+        b.downSinceMs = 0;
+        b.nextRepeatMs = 0;
+      }
+    }
+  }
+
+  // repeat
+  if (b.stable == false && b.nextRepeatMs && (int32_t)(now - b.nextRepeatMs) >= 0) {
+    b.repeatEvt = true;
+    b.nextRepeatMs = now + UI_BTN_REPEAT_RATE_MS;
+  }
+}
+
+static inline bool uiBtnPressed(const UiBtn& b) { return b.pressedEvt; }
+static inline bool uiBtnRepeat(const UiBtn& b)  { return b.repeatEvt; }
+static inline uint32_t uiBtnHeldMs(const UiBtn& b) {
+  if (b.stable == false && b.downSinceMs) return millis() - b.downSinceMs;
+  return 0;
+}
+
+static void uiScanButtons() {
+  uiBtnScanOne(ui_bLeft);
+  uiBtnScanOne(ui_bRight);
+  uiBtnScanOne(ui_bUp);
+  uiBtnScanOne(ui_bDown);
+  uiBtnScanOne(ui_bBack);
+  uiBtnScanOne(ui_bOk);
+
+  if (UI_SWAP_LEFT_RIGHT) {
+    UiBtn tmp = ui_bLeft; ui_bLeft = ui_bRight; ui_bRight = tmp;
+  }
+  if (UI_SWAP_UP_DOWN) {
+    UiBtn tmp = ui_bUp; ui_bUp = ui_bDown; ui_bDown = tmp;
+  }
+}
+
+// =====================
+// UI Params
+// =====================
+static UiParamRef uiParams[] = {
+  // MAINS
+  {UiCategory::MAINS, "MAINS_HIGH_V",     UiParamType::F32, &g_set.mainsHigh,    150, 270, 1.0f, "mHi"},
+  {UiCategory::MAINS, "MAINS_NORMAL_MIN", UiParamType::F32, &g_set.mainsNormMin,  80, 260, 1.0f, "mNmn"},
+  {UiCategory::MAINS, "MAINS_NORMAL_MAX", UiParamType::F32, &g_set.mainsNormMax,  80, 270, 1.0f, "mNmx"},
+  {UiCategory::MAINS, "MAINS_LOW_V",      UiParamType::F32, &g_set.mainsLow,      50, 250, 1.0f, "mLo"},
+  {UiCategory::MAINS, "MAINS_CRIT_V",     UiParamType::F32, &g_set.mainsCrit,     20, 240, 1.0f, "mCr"},
+
+  // GEN
+  {UiCategory::GEN, "GEN_OFF_V",        UiParamType::F32, &g_set.genOff,     0, 120, 1.0f, "gOff"},
+  {UiCategory::GEN, "GEN_LOW_V",        UiParamType::F32, &g_set.genLow,    50, 230, 1.0f, "gLo"},
+  {UiCategory::GEN, "GEN_NORMAL_MIN",   UiParamType::F32, &g_set.genNormMin,80, 260, 1.0f, "gNmn"},
+  {UiCategory::GEN, "GEN_NORMAL_MAX",   UiParamType::F32, &g_set.genNormMax,80, 270, 1.0f, "gNmx"},
+  {UiCategory::GEN, "GEN_RUNNING_V",    UiParamType::F32, &g_set.genRunningV,50, 260, 1.0f, "gRunV"},
+  {UiCategory::GEN, "GEN_RUN_CONFIRM_S",UiParamType::U16, &g_set.genRunConfirmS,1, 120, 1.0f, "gRunC"},
+
+  // BATT
+  {UiCategory::BATT, "BATT_HIGH_V",     UiParamType::F32, &g_set.battHigh,    11.5f, 15.0f, 0.05f, "bHi"},
+  {UiCategory::BATT, "BATT_NORMAL_MIN", UiParamType::F32, &g_set.battNormMin, 11.0f, 14.0f, 0.05f, "bNmn"},
+  {UiCategory::BATT, "BATT_LOW_V",      UiParamType::F32, &g_set.battLow,     10.0f, 14.0f, 0.05f, "bLo"},
+  {UiCategory::BATT, "BATT_CRIT_V",     UiParamType::F32, &g_set.battCrit,     9.0f, 13.5f, 0.05f, "bCr"},
+  {UiCategory::BATT, "HYST_V_BATT",     UiParamType::F32, &g_set.hystBatt,     0.0f,  1.0f,  0.01f, "hBt"},
+
+  // AUTO
+  {UiCategory::AUTO, "AUTO_START_MAINS_V",     UiParamType::F32, &g_set.autoStartMainsV, 50, 240, 1.0f, "aMnsV"},
+  {UiCategory::AUTO, "MAINS_FAIL_CONFIRM_S",   UiParamType::U16, &g_set.mainsFailConfirmS, 1, 600, 1.0f, "aFail"},
+  {UiCategory::AUTO, "MAINS_RETURN_CONFIRM_S", UiParamType::U16, &g_set.mainsReturnConfirmS, 1, 600, 1.0f, "aRet"},
+  {UiCategory::AUTO, "COOLDOWN_S",             UiParamType::U16, &g_set.cooldownS, 5, 3600, 1.0f, "aCool"},
+
+  // TIMING
+  {UiCategory::TIMING, "FUEL_PRIME_MS",        UiParamType::U16, &g_set.fuelPrimeMs, 0, 10000, 50.0f, "pF"},
+  {UiCategory::TIMING, "START_PULSE_MS",       UiParamType::U16, &g_set.startPulseMs, 100, 8000, 50.0f, "pSt"},
+  {UiCategory::TIMING, "START_RETRY_GAP_MS",   UiParamType::U32, &g_set.startRetryGapMs, 0, 30000, 50.0f, "gSt"},
+  {UiCategory::TIMING, "START_SENSE_GRACE_MS", UiParamType::U16, &g_set.startSenseGraceMs, 0, 30000, 50.0f, "sSt"},
+  {UiCategory::TIMING, "START_MAX_ATTEMPTS",   UiParamType::U8,  &g_set.startMaxAttempts, 1, 10, 1.0f, "aAtt"},
+  {UiCategory::TIMING, "STOP_PULSE_MS",        UiParamType::U16, &g_set.stopPulseMs, 100, 8000, 50.0f, "pSp"},
+  {UiCategory::TIMING, "STOP_VERIFY_S",        UiParamType::U16, &g_set.stopVerifyS, 1, 120, 1.0f, "vSp"},
+  {UiCategory::TIMING, "STOP_MAX_ATTEMPTS",    UiParamType::U8,  &g_set.stopMaxAttempts, 1, 10, 1.0f, "mSp"},
+  {UiCategory::TIMING, "FUEL_OFF_DELAY_MS",    UiParamType::U16, &g_set.fuelOffDelayMs, 0, 10000, 50.0f, "dF"},
+  {UiCategory::TIMING, "HOURS_SAVE_PERIOD_S",  UiParamType::U32, &g_set.hoursSavePeriodS, 10, 3600, 10.0f, "hSaveP"},
+
+  // FAULT
+  {UiCategory::FAULT, "FAULT_MAX_RETRIES",   UiParamType::U8,  &g_set.faultMaxRetries, 0, 10, 1.0f, "fMax"},
+  {UiCategory::FAULT, "FAULT_RETRY_BASE_S",  UiParamType::U16, &g_set.faultRetryBaseS, 10, 3600, 10.0f, "fBase"},
+  {UiCategory::FAULT, "FAULT_RETRY_MAX_S",   UiParamType::U16, &g_set.faultRetryMaxS,  10, 7200, 10.0f, "fCap"},
+
+  // CAL
+  {UiCategory::CAL, "CAL_MAINS",    UiParamType::F32, &g_set.calMains,   10, 600, 1.0f, "calMains"},
+  {UiCategory::CAL, "CAL_GEN",      UiParamType::F32, &g_set.calGen,     10, 600, 1.0f, "calGen"},
+  {UiCategory::CAL, "GEN_DIV",      UiParamType::F32, &g_set.genBattDiv, 1,  10,  0.01f, "genDiv"},
+  {UiCategory::CAL, "CAM_DIV",      UiParamType::F32, &g_set.camBattDiv, 1,  10,  0.01f, "camDiv"},
+};
+
+static const char* uiCatName(UiCategory c) {
+  switch (c) {
+    case UiCategory::MAINS:  return "Mains";
+    case UiCategory::GEN:    return "Gen";
+    case UiCategory::BATT:   return "Batt";
+    case UiCategory::AUTO:   return "Auto";
+    case UiCategory::TIMING: return "Timing";
+    case UiCategory::FAULT:  return "Fault";
+    case UiCategory::CAL:    return "Cal";
+    default:                 return "?";
+  }
+}
+
+static UiCatList uiGetCatList(UiCategory cat) {
+  UiParamRef* first = nullptr;
+  uint8_t count = 0;
+
+  for (uint16_t i = 0; i < (sizeof(uiParams) / sizeof(uiParams[0])); i++) {
+    if (uiParams[i].cat == cat) {
+      if (!first) first = &uiParams[i];
+      count++;
+    }
+  }
+  UiCatList cl; cl.arr = first; cl.count = count;
+  return cl;
+}
+
+static UiParamRef* uiCurrentParamBy(UiCategory cat, uint8_t idxInCat) {
+  uint8_t seen = 0;
+  for (uint16_t i = 0; i < (sizeof(uiParams) / sizeof(uiParams[0])); i++) {
+    if (uiParams[i].cat == cat) {
+      if (seen == idxInCat) return &uiParams[i];
+      seen++;
+    }
+  }
+  return nullptr;
+}
+
+static float uiParamGetF(const UiParamRef& p) {
   switch (p.type) {
     case UiParamType::F32: return *(float*)p.ptr;
     case UiParamType::U16: return (float)(*(uint16_t*)p.ptr);
@@ -1027,9 +1220,8 @@ static float uiParamGet(const UiParamRef& p) {
   }
 }
 
-static void uiParamSet(const UiParamRef& p, float v) {
-  if (v < p.vMin) v = p.vMin;
-  if (v > p.vMax) v = p.vMax;
+static void uiParamSetF(const UiParamRef& p, float v) {
+  v = constrain(v, p.minF, p.maxF);
   switch (p.type) {
     case UiParamType::F32: *(float*)p.ptr = v; break;
     case UiParamType::U16: *(uint16_t*)p.ptr = (uint16_t)lroundf(v); break;
@@ -1040,457 +1232,283 @@ static void uiParamSet(const UiParamRef& p, float v) {
 }
 
 static String uiParamValueText(const UiParamRef& p) {
-  float v = uiParamGet(p);
-  if (p.type == UiParamType::F32) return fmt2(v) + String(p.unit);
-  return String((uint32_t)lroundf(v)) + String(p.unit);
+  float v = uiParamGetF(p);
+  if (p.type == UiParamType::F32) return fmt2(v);
+  return String((uint32_t)lroundf(v));
 }
 
-static const char* uiCatName(UiCategory c) {
-  switch (c) {
-    case UiCategory::MAINS:  return "MAINS";
-    case UiCategory::GEN:    return "GEN";
-    case UiCategory::BATT:   return "BATT";
-    case UiCategory::AUTO:   return "AUTO";
-    case UiCategory::TIMING: return "TIMING";
-    case UiCategory::FAULT:  return "FAULT";
-    case UiCategory::CAL:    return "CAL";
-    default:                 return "UNK";
-  }
-}
+static float uiStepAccel(const UiParamRef& p, uint32_t heldMs) {
+  float s = p.stepF;
+  if (!UI_ENABLE_ACCEL) return s;
 
-// Param arrays
-static UiParamRef UI_PARAM_MAINS[] = {
-  {"mainsCrit",    UiParamType::F32, &g_set.mainsCrit,    1, 5,   0, 260, "V"},
-  {"mainsLow",     UiParamType::F32, &g_set.mainsLow,     1, 5,   0, 260, "V"},
-  {"mainsNormMin", UiParamType::F32, &g_set.mainsNormMin, 1, 5,   0, 260, "V"},
-  {"mainsNormMax", UiParamType::F32, &g_set.mainsNormMax, 1, 5,   0, 260, "V"},
-  {"mainsHigh",    UiParamType::F32, &g_set.mainsHigh,    1, 5,   0, 300, "V"},
-  {"hystAc",       UiParamType::F32, &g_set.hystAc,       1, 2,   0,  50, "V"},
-};
+  float mult = 1.0f;
+  if (heldMs >= UI_ACCEL_3_MS) mult = UI_ACCEL_3_MULT;
+  else if (heldMs >= UI_ACCEL_2_MS) mult = UI_ACCEL_2_MULT;
+  else if (heldMs >= UI_ACCEL_1_MS) mult = UI_ACCEL_1_MULT;
 
-static UiParamRef UI_PARAM_GEN[] = {
-  {"genOff",     UiParamType::F32, &g_set.genOff,     1, 5,  0, 260, "V"},
-  {"genLow",     UiParamType::F32, &g_set.genLow,     1, 5,  0, 260, "V"},
-  {"genNormMin", UiParamType::F32, &g_set.genNormMin, 1, 5,  0, 260, "V"},
-  {"genNormMax", UiParamType::F32, &g_set.genNormMax, 1, 5,  0, 300, "V"},
-  {"genRunningV",UiParamType::F32, &g_set.genRunningV,1, 5,  0, 260, "V"},
-  {"genRunConfirmS", UiParamType::U16, &g_set.genRunConfirmS, 1, 5,  1, 120, "s"},
-};
-
-static UiParamRef UI_PARAM_BATT[] = {
-  {"battCrit",    UiParamType::F32, &g_set.battCrit,    0.05f, 0.2f,  8.0f, 15.0f, "V"},
-  {"battLow",     UiParamType::F32, &g_set.battLow,     0.05f, 0.2f,  8.0f, 15.0f, "V"},
-  {"battNormMin", UiParamType::F32, &g_set.battNormMin, 0.05f, 0.2f,  8.0f, 15.0f, "V"},
-  {"battHigh",    UiParamType::F32, &g_set.battHigh,    0.05f, 0.2f,  8.0f, 15.0f, "V"},
-  {"hystBatt",    UiParamType::F32, &g_set.hystBatt,    0.01f, 0.05f, 0.00f, 1.0f,  "V"},
-};
-
-static UiParamRef UI_PARAM_AUTO[] = {
-  {"autoStartMainsV",   UiParamType::F32, &g_set.autoStartMainsV,   1, 5,   0, 260, "V"},
-  {"mainsFailConfirmS", UiParamType::U16, &g_set.mainsFailConfirmS, 1, 5,   1, 300, "s"},
-  {"mainsReturnConfirmS",UiParamType::U16,&g_set.mainsReturnConfirmS,1, 5,  1, 600, "s"},
-  {"cooldownS",         UiParamType::U16, &g_set.cooldownS,         5, 30,  5, 3600,"s"},
-};
-
-static UiParamRef UI_PARAM_TIMING[] = {
-  {"fuelPrimeMs",       UiParamType::U16, &g_set.fuelPrimeMs,       50, 200,  0, 10000, "ms"},
-  {"startPulseMs",      UiParamType::U16, &g_set.startPulseMs,      50, 200,  50, 10000, "ms"},
-  {"startRetryGapMs",   UiParamType::U32, &g_set.startRetryGapMs,   100, 500,  0, 60000, "ms"},
-  {"startSenseGraceMs", UiParamType::U16, &g_set.startSenseGraceMs, 100, 500,  0, 60000, "ms"},
-  {"startMaxAttempts",  UiParamType::U8,  &g_set.startMaxAttempts,  1, 1,    1,  10, ""},
-  {"stopPulseMs",       UiParamType::U16, &g_set.stopPulseMs,       50, 200,  50, 10000, "ms"},
-  {"stopVerifyS",       UiParamType::U16, &g_set.stopVerifyS,       1, 5,    1, 120, "s"},
-  {"stopMaxAttempts",   UiParamType::U8,  &g_set.stopMaxAttempts,   1, 1,    1,  10, ""},
-  {"fuelOffDelayMs",    UiParamType::U16, &g_set.fuelOffDelayMs,    50, 200,  0, 10000, "ms"},
-  {"hoursSavePeriodS",  UiParamType::U32, &g_set.hoursSavePeriodS,  10, 60,  10, 3600, "s"},
-};
-
-static UiParamRef UI_PARAM_FAULT[] = {
-  {"faultMaxRetries",   UiParamType::U8,  &g_set.faultMaxRetries,   1, 1,    0, 10, ""},
-  {"faultRetryBaseS",   UiParamType::U16, &g_set.faultRetryBaseS,   10, 60,  10, 7200, "s"},
-  {"faultRetryMaxS",    UiParamType::U16, &g_set.faultRetryMaxS,    10, 60,  0,  7200, "s"},
-};
-
-static UiParamRef UI_PARAM_CAL[] = {
-  {"calMains",   UiParamType::F32, &g_set.calMains,   1, 5,   10, 500, ""},
-  {"calGen",     UiParamType::F32, &g_set.calGen,     1, 5,   10, 500, ""},
-  {"genBattDiv", UiParamType::F32, &g_set.genBattDiv, 0.01f, 0.10f, 1.0f, 10.0f, ""},
-  {"camBattDiv", UiParamType::F32, &g_set.camBattDiv, 0.01f, 0.10f, 1.0f, 10.0f, ""},
-};
-
-static UiCatList ui_cats[] = {
-  {UiCategory::MAINS,  UI_PARAM_MAINS,  (uint16_t)(sizeof(UI_PARAM_MAINS)/sizeof(UI_PARAM_MAINS[0]))},
-  {UiCategory::GEN,    UI_PARAM_GEN,    (uint16_t)(sizeof(UI_PARAM_GEN)/sizeof(UI_PARAM_GEN[0]))},
-  {UiCategory::BATT,   UI_PARAM_BATT,   (uint16_t)(sizeof(UI_PARAM_BATT)/sizeof(UI_PARAM_BATT[0]))},
-  {UiCategory::AUTO,   UI_PARAM_AUTO,   (uint16_t)(sizeof(UI_PARAM_AUTO)/sizeof(UI_PARAM_AUTO[0]))},
-  {UiCategory::TIMING, UI_PARAM_TIMING, (uint16_t)(sizeof(UI_PARAM_TIMING)/sizeof(UI_PARAM_TIMING[0]))},
-  {UiCategory::FAULT,  UI_PARAM_FAULT,  (uint16_t)(sizeof(UI_PARAM_FAULT)/sizeof(UI_PARAM_FAULT[0]))},
-  {UiCategory::CAL,    UI_PARAM_CAL,    (uint16_t)(sizeof(UI_PARAM_CAL)/sizeof(UI_PARAM_CAL[0]))},
-};
-
-// =====================
-// -------- UI BUTTONS --------
-// =====================
-static void uiBtnInit(UiBtn& b, uint8_t pin) {
-  b.pin = pin;
-  pinMode(pin, INPUT_PULLUP);
-  bool r = digitalRead(pin);
-  b.stable = r;
-  b.lastRead = r;
-  b.lastChangeMs = millis();
-  b.pressedEvt = false;
-  b.repeatEvt = false;
-  b.downMs = 0;
-  b.lastRepeatMs = 0;
-}
-
-static void uiBtnScanOne(UiBtn& b) {
-  uint32_t now = millis();
-  bool r = digitalRead(b.pin);
-
-  b.pressedEvt = false;
-  b.repeatEvt  = false;
-
-  if (r != b.lastRead) {
-    b.lastRead = r;
-    b.lastChangeMs = now;
-  }
-
-  if (now - b.lastChangeMs >= BTN_DEBOUNCE_MS) {
-    if (b.stable != b.lastRead) {
-      b.stable = b.lastRead;
-      if (b.stable == LOW) {
-        b.pressedEvt = true;
-        b.downMs = now;
-        b.lastRepeatMs = now;
-      }
-    }
-  }
-
-  if (b.stable == LOW) {
-    uint32_t held = now - b.downMs;
-    if (held >= BTN_REPEAT_START_MS) {
-      if (now - b.lastRepeatMs >= BTN_REPEAT_PERIOD_MS) {
-        b.lastRepeatMs = now;
-        b.repeatEvt = true;
-      }
-    }
-  }
-}
-
-static void uiBtnScanAll() {
-  uiBtnScanOne(ui_bLeft);
-  uiBtnScanOne(ui_bRight);
-  uiBtnScanOne(ui_bUp);
-  uiBtnScanOne(ui_bDown);
-  uiBtnScanOne(ui_bBack);
-  uiBtnScanOne(ui_bOk);
-}
-
-static bool uiBtnPressedEvt(UiBtn& b) { return b.pressedEvt; }
-static bool uiBtnRepeatEvt(UiBtn& b)  { return b.repeatEvt; }
-
-static uint32_t uiBtnHeldMs(const UiBtn& b) {
-  if (b.stable == LOW) return millis() - b.downMs;
-  return 0;
+  return s * mult;
 }
 
 // =====================
-// -------- TFT DRAW --------
+// UI State
 // =====================
-static void uiTftHeader(const String& title, const String& right = "") {
-  tft.fillRect(0, 0, 320, 28, ILI9341_NAVY);
-  tft.setCursor(6, 6);
-  tft.setTextColor(ILI9341_WHITE, ILI9341_NAVY);
+static UiScreen ui_screen = UiScreen::STATUS;
+static uint8_t ui_statusPage = 0;
+
+static uint8_t ui_menuIndex = 0;
+static const uint8_t UI_MENU_COUNT = 5;
+
+static UiCategory ui_cat = UiCategory::MAINS;
+static uint8_t ui_paramIndex = 0;
+
+static UiParamRef* ui_editParam = nullptr;
+static float ui_editOrig = 0;
+static float ui_editDraft = 0;
+static bool  ui_editDirty = false;
+
+static String ui_confirmText;
+
+// =====================
+// TFT drawing helpers
+// =====================
+#if USE_TFT
+static void tftHeader(const String& title, const String& right="") {
+  tft.fillRect(0, 0, 240, 24, UI_COLOR_HEADER_BG);
+  tft.setTextColor(UI_COLOR_HEADER_FG);
   tft.setTextSize(2);
+  tft.setCursor(4, 4);
   tft.print(title);
-
   if (right.length()) {
-    int16_t x1, y1;
-    uint16_t w, h;
-    tft.getTextBounds(right, 0, 0, &x1, &y1, &w, &h);
-    int16_t rx = 320 - 6 - (int16_t)w;
-    tft.setCursor(rx, 6);
+    int16_t x = 240 - (right.length() * 12) - 4;
+    if (x < 120) x = 120;
+    tft.setCursor(x, 4);
     tft.print(right);
   }
 }
 
-static void uiTftLine(int y, const String& text, uint16_t color = ILI9341_WHITE) {
-  tft.fillRect(0, y, 320, 26, ILI9341_BLACK);
-  tft.setCursor(6, y + 5);
-  tft.setTextColor(color, ILI9341_BLACK);
-  tft.setTextSize(2);
-  tft.print(text);
+static void tftLine(int y, const String& s, uint16_t col=UI_COLOR_TEXT, uint8_t size=2) {
+  tft.setTextSize(size);
+  tft.setTextColor(col);
+  tft.setCursor(4, y);
+  tft.print(s);
 }
 
-static void uiTftSmall(int y, const String& text, uint16_t color = ILI9341_LIGHTGREY) {
-  tft.fillRect(0, y, 320, 18, ILI9341_BLACK);
-  tft.setCursor(6, y + 3);
-  tft.setTextColor(color, ILI9341_BLACK);
-  tft.setTextSize(1);
-  tft.print(text);
+static void tftClearBody() {
+  tft.fillRect(0, 24, 240, 296, UI_COLOR_BG);
 }
+#endif
 
 // =====================
-// -------- UI FLOW --------
+// UI screens
 // =====================
-static void uiTrackChange(const char* pname, const String& vtxt) {
-  ui_dirty = true;
-  String line = String(pname) + "=" + vtxt;
-  if (ui_changedSummary.indexOf(line) < 0) {
-    if (ui_changedSummary.length() < 700) {
-      if (ui_changedSummary.length()) ui_changedSummary += ", ";
-      ui_changedSummary += line;
-    }
+static void uiDrawStatus(bool force) {
+#if USE_TFT
+  (void)force;
+  tft.fillScreen(UI_COLOR_BG);
+  tftHeader(String(DEVICE_NAME), String(PROJECT_VERSION));
+
+  tftLine(30, "Mod: " + String(modeText(g_mode)));
+  tftLine(50, "Auto: " + String(autoStateText(g_autoState)));
+  tftLine(70, "Fuel: " + String(g_fuelOn ? "ON" : "OFF"));
+
+  if (ui_statusPage == 0) {
+    tftLine(100, "Sayfa: MAINS");
+    tftLine(120, "V=" + fmt2(g_meas.mainsV) + "  (" + String((int)g_mainsState) + ")");
+    tftLine(140, mainsStateLine(g_mainsState, g_meas.mainsV));
+  } else if (ui_statusPage == 1) {
+    tftLine(100, "Sayfa: GEN");
+    tftLine(120, "V=" + fmt2(g_meas.genV) + "  (" + String((int)g_genState) + ")");
+    tftLine(140, genStateLine(g_genState, g_meas.genV));
+    tftLine(170, "RunNow=" + String(isGenRunningNow() ? "YES" : "NO"));
+    tftLine(190, "Total=" + fmtHMS(g_genRunTotalS), UI_COLOR_TEXT_DIM, 2);
+  } else if (ui_statusPage == 2) {
+    tftLine(100, "Sayfa: BATT");
+    tftLine(120, "Gen=" + fmt2(g_meas.genBattV) + "V " + battStateToText(g_genBattState));
+    tftLine(140, "Cam=" + fmt2(g_meas.camBattV) + "V " + battStateToText(g_camBattState));
+  } else {
+    tftLine(100, "Sayfa: NET");
+    tftLine(120, "WiFi RSSI: " + String(g_meas.wifiRssi));
+    tftLine(140, "Uptime: " + String(g_meas.uptimeS) + "s");
   }
-}
 
-static void uiDrawStatusPage(bool force) {
-  if (!force && millis() - ui_tRedraw < UI_STATUS_REFRESH_MS) return;
-  ui_tRedraw = millis();
-
-  String top = String("P") + (ui_statusPage + 1) + "/4 " + String(modeText(g_mode));
-  uiTftHeader(String(DEVICE_NAME), top);
-
-  switch (ui_statusPage) {
-    case 0:
-      uiTftLine(32, "MAINS: " + fmt2(g_meas.mainsV) + "V", ILI9341_CYAN);
-      uiTftLine(60, "GEN:   " + fmt2(g_meas.genV)   + "V", ILI9341_GREEN);
-      uiTftLine(88, String("Auto: ") + autoStateText(g_autoState), ILI9341_YELLOW);
-      uiTftLine(116, String("Fuel: ") + (g_fuelOn ? "ON" : "OFF") + "  Run:" + (isGenRunningNow() ? "YES" : "NO"),
-                g_fuelOn ? ILI9341_ORANGE : ILI9341_LIGHTGREY);
-      uiTftSmall(146, "OK=Menu  L/R=Sayfa");
-      break;
-
-    case 1:
-      uiTftLine(32, "GenBatt: " + fmt2(g_meas.genBattV) + "V " + battStateToText(g_genBattState), ILI9341_GREEN);
-      uiTftLine(60, "CamBatt: " + fmt2(g_meas.camBattV) + "V " + battStateToText(g_camBattState), ILI9341_GREEN);
-      uiTftLine(88, "AutoStart: " + fmt2(g_set.autoStartMainsV) + "V", ILI9341_YELLOW);
-      uiTftLine(116, "Hyst AC: " + fmt2(g_set.hystAc) + "V  BT: " + fmt2(g_set.hystBatt) + "V", ILI9341_LIGHTGREY);
-      uiTftSmall(146, "OK=Menu  L/R=Sayfa");
-      break;
-
-    case 2:
-      uiTftLine(32, String("StartSeq: ") + (g_startSeq.active ? "ACTIVE" : "IDLE"), ILI9341_YELLOW);
-      uiTftLine(60, String("StopSeq:  ") + (g_stopSeq.active  ? "ACTIVE" : "IDLE"), ILI9341_YELLOW);
-      uiTftLine(88, String("Pulse:    ") + (g_pulseActive ? "ON" : "OFF"), ILI9341_LIGHTGREY);
-      uiTftLine(116, String("Relays F/S/T: ") + (g_fuelOn?"1":"0") + "/" + (g_startOn?"1":"0") + "/" + (g_stopOn?"1":"0"),
-                ILI9341_CYAN);
-      uiTftSmall(146, "OK=Menu  L/R=Sayfa");
-      break;
-
-    default:
-      uiTftLine(32, "Uptime: " + fmtDurTR(g_meas.uptimeS), ILI9341_CYAN);
-      uiTftLine(60, "Hours:  " + fmtHMS(g_genRunTotalS), ILI9341_GREEN);
-      uiTftLine(88, "WiFi RSSI: " + String(g_meas.wifiRssi), ILI9341_LIGHTGREY);
-      uiTftLine(116, String("WiFi: ") + (WiFi.status() == WL_CONNECTED ? "OK" : "OFF"),
-                WiFi.status() == WL_CONNECTED ? ILI9341_GREEN : ILI9341_RED);
-      uiTftSmall(146, "OK=Menu  L/R=Sayfa");
-      break;
-  }
+  tftLine(280, "L/R: Sayfa  OK: Menu", UI_COLOR_TEXT_DIM, 1);
+#endif
 }
 
 static void uiDrawMenu(bool force) {
+#if USE_TFT
   (void)force;
-  uiTftHeader("MENU", String(modeText(g_mode)));
-  uiTftLine(40, (ui_menuIndex == 0 ? "> " : "  ") + String("Durum"), ui_menuIndex==0 ? ILI9341_YELLOW : ILI9341_WHITE);
-  uiTftLine(68, (ui_menuIndex == 1 ? "> " : "  ") + String("Ayarlar"), ui_menuIndex==1 ? ILI9341_YELLOW : ILI9341_WHITE);
-  uiTftSmall(110, "Up/Down=Sec  OK=Gir  Back=Cik");
+  tft.fillScreen(UI_COLOR_BG);
+  tftHeader("MENU", "");
+
+  const char* items[UI_MENU_COUNT] = {
+    "Ayarlar",
+    "AUTO <-> MANUAL",
+    "MANUAL START",
+    "MANUAL STOP",
+    "Reset Hours"
+  };
+
+  for (uint8_t i = 0; i < UI_MENU_COUNT; i++) {
+    int y = 40 + (i * 34);
+    bool sel = (i == ui_menuIndex);
+    if (sel) tft.fillRect(0, y-2, 240, 28, UI_COLOR_SEL_BG);
+    tft.setTextSize(2);
+    tft.setCursor(8, y);
+    tft.setTextColor(sel ? UI_COLOR_SEL_FG : UI_COLOR_TEXT);
+    tft.print(items[i]);
+  }
+
+  tftLine(280, "UP/DN: Sec  OK: Gir  BACK: Cik", UI_COLOR_TEXT_DIM, 1);
+#endif
 }
 
 static void uiDrawSettings(bool force) {
+#if USE_TFT
   (void)force;
+  UiCatList cl = uiGetCatList(ui_cat);
 
-  UiCatList& cl = ui_cats[ui_catIndex];
-  if (ui_paramIndex >= cl.count) ui_paramIndex = 0;
-  UiParamRef& p = cl.list[ui_paramIndex];
+  tft.fillScreen(UI_COLOR_BG);
+  String right = String(uiCatName(ui_cat)) + " " + String(ui_paramIndex + 1) + "/" + String(cl.count);
+  tftHeader("AYARLAR", right);
 
-  String right = String(uiCatName(cl.cat)) + " " + String(ui_paramIndex + 1) + "/" + String(cl.count);
-  if (ui_dirty) right += " *";
-  uiTftHeader("AYARLAR", right);
+  UiParamRef* p = uiCurrentParamBy(ui_cat, ui_paramIndex);
+  if (!p) { tftLine(60, "Param yok"); return; }
 
-  uiTftLine(40, String("Param: ") + p.name, ILI9341_CYAN);
-  uiTftLine(68, String("Value: ") + uiParamValueText(p), ILI9341_GREEN);
+  tftLine(40, "Kategori: " + String(uiCatName(ui_cat)));
+  tftLine(70, String("Param: ") + p->name, UI_COLOR_TEXT, 2);
+  tftLine(100, String("Deger: ") + uiParamValueText(*p));
+  tftLine(130, "OK: Duzenle");
 
-  if (ui_editing) {
-    uiTftLine(96, "EDIT MODE", ILI9341_YELLOW);
-    uiTftSmall(128, "Up/Down=Degistir  OK=Onay  Back=Iptal");
-  } else {
-    uiTftLine(96, String("Kategori: ") + uiCatName(cl.cat), ILI9341_LIGHTGREY);
-    uiTftSmall(128, "L/R=Param  Up/Down=Kategori  OK=Edit  Back=Cik");
-    uiTftSmall(146, "Dirty varsa cikista Save/Discard");
+  tftLine(280, "L/R: Kategori  U/D: Param  BACK:Cik", UI_COLOR_TEXT_DIM, 1);
+#endif
+}
+
+static void uiDrawEdit(bool force) {
+#if USE_TFT
+  (void)force;
+  tft.fillScreen(UI_COLOR_BG);
+  tftHeader("DUZENLE", "");
+
+  if (!ui_editParam) { tftLine(60, "Param yok"); return; }
+
+  tftLine(40, String("Param: ") + ui_editParam->name);
+  tftLine(70, String("Deger: ") + fmt2(ui_editDraft));
+  tftLine(100, ui_editDirty ? "Durum: Kaydedilmedi" : "Durum: Degismedi", ui_editDirty ? UI_COLOR_WARN : UI_COLOR_TEXT_DIM, 2);
+
+  tftLine(140, "UP: +   DOWN: -");
+  tftLine(170, "OK: Kaydet?  BACK: Iptal");
+  tftLine(280, "Hold: hizli artir/azalt", UI_COLOR_TEXT_DIM, 1);
+#endif
+}
+
+static void uiDrawConfirm(bool force) {
+#if USE_TFT
+  (void)force;
+  tft.fillScreen(UI_COLOR_BG);
+  tftHeader("KAYDET?", "");
+
+  tftLine(60, ui_confirmText);
+  tftLine(120, "OK: Evet (NVS)");
+  tftLine(150, "BACK: Hayir");
+#endif
+}
+
+static void uiEnter(UiScreen s) {
+  ui_screen = s;
+  switch (ui_screen) {
+    case UiScreen::STATUS:   uiDrawStatus(true); break;
+    case UiScreen::MENU:     uiDrawMenu(true); break;
+    case UiScreen::SETTINGS: uiDrawSettings(true); break;
+    case UiScreen::EDIT:     uiDrawEdit(true); break;
+    case UiScreen::CONFIRM:  uiDrawConfirm(true); break;
   }
 }
 
-static void uiDrawConfirmExit(bool force) {
-  (void)force;
-  uiTftHeader("KAYDET?", ui_dirty ? "*" : "");
-  uiTftLine(50, "Degisiklikler var.", ILI9341_WHITE);
-  uiTftLine(78, "Kaydedilsin mi?", ILI9341_WHITE);
+// =====================
+// UI Actions
+// =====================
+static void uiEnterEdit() {
+  UiParamRef* p = uiCurrentParamBy(ui_cat, ui_paramIndex);
+  if (!p) return;
 
-  String a = (ui_confirmChoice == 0 ? "> " : "  "); a += "Hayir (Discard)";
-  String b = (ui_confirmChoice == 1 ? "> " : "  "); b += "Evet (Save)";
-  uiTftLine(112, a, ui_confirmChoice==0 ? ILI9341_YELLOW : ILI9341_WHITE);
-  uiTftLine(140, b, ui_confirmChoice==1 ? ILI9341_YELLOW : ILI9341_WHITE);
-  uiTftSmall(172, "L/R=Sec  OK=Uygula  Back=Geri");
+  ui_editParam = p;
+  ui_editOrig = uiParamGetF(*p);
+  ui_editDraft = ui_editOrig;
+  ui_editDirty = false;
+  uiEnter(UiScreen::EDIT);
 }
 
-static void uiEnterMenu() { ui_state = UiState::MENU; uiDrawMenu(true); }
-static void uiEnterStatus() { ui_state = UiState::STATUS; uiDrawStatusPage(true); }
-
-static void uiEnterSettings() {
-  ui_state = UiState::SETTINGS;
-  ui_editing = false;
-  ui_dirty = false;
-  ui_changedSummary = "";
-  ui_snapshot = g_set;
-  ui_catIndex = 0;
-  ui_paramIndex = 0;
-  ui_editOldValid = false;
-  uiDrawSettings(true);
+static void uiApplyDraftToLive() {
+  if (!ui_editParam) return;
+  uiParamSetF(*ui_editParam, ui_editDraft);
 }
 
-static void uiEnterConfirmExit() { ui_state = UiState::CONFIRM_EXIT; ui_confirmChoice = 1; uiDrawConfirmExit(true); }
-
-static void uiDiscardChanges() {
-  g_set = ui_snapshot;
-  ui_dirty = false;
-  ui_changedSummary = "";
+static void uiCancelEdit() {
+  if (!ui_editParam) return;
+  uiParamSetF(*ui_editParam, ui_editOrig);
+  ui_editParam = nullptr;
+  ui_editDirty = false;
+  uiEnter(UiScreen::SETTINGS);
 }
 
-static void uiSaveChangesAndNotify() {
+static void uiRequestSaveConfirm() {
+  if (!ui_editParam) return;
+
+  // draft'ı live'a yaz
+  uiApplyDraftToLive();
+
+  ui_confirmText = String("⚙️ ") + ui_editParam->name + " = " + uiParamValueText(*ui_editParam);
+  uiEnter(UiScreen::CONFIRM);
+}
+
+static void uiDoSave() {
+  // NVS save + telegram notify
   saveSettings();
   saveHoursTotal();
 
-  String msg = "💾 TFT: Ayarlar kaydedildi.";
-  if (ui_changedSummary.length()) msg += "\n⚙️ Degisenler: " + ui_changedSummary;
-  notify(msg);
-
-  ui_snapshot = g_set;
-  ui_dirty = false;
-  ui_changedSummary = "";
-}
-
-static float uiCurrentStepFor(const UiParamRef& p) {
-  uint32_t heldUp   = uiBtnHeldMs(ui_bUp);
-  uint32_t heldDown = uiBtnHeldMs(ui_bDown);
-  uint32_t held = max(heldUp, heldDown);
-  if (held >= BTN_FAST_STEP_AFTER_MS) return p.stepFast;
-  return p.step;
-}
-
-static void uiService() {
-  uiBtnScanAll();
-
-  if (ui_state == UiState::STATUS) {
-    uiDrawStatusPage(false);
-    if (uiBtnPressedEvt(ui_bLeft))  { ui_statusPage = (ui_statusPage + 3) % 4; uiDrawStatusPage(true); }
-    if (uiBtnPressedEvt(ui_bRight)) { ui_statusPage = (ui_statusPage + 1) % 4; uiDrawStatusPage(true); }
-    if (uiBtnPressedEvt(ui_bOk))    { uiEnterMenu(); }
-    return;
+  if (ui_editParam) {
+    notify(String("⚙️ TFT Ayar değişti: ") + ui_editParam->name + " = " + uiParamValueText(*ui_editParam));
+  } else {
+    notify("⚙️ TFT Ayar kaydedildi.");
   }
 
-  if (ui_state == UiState::MENU) {
-    if (uiBtnPressedEvt(ui_bUp))   { if (ui_menuIndex > 0) ui_menuIndex--; uiDrawMenu(true); }
-    if (uiBtnPressedEvt(ui_bDown)) { if (ui_menuIndex < 1) ui_menuIndex++; uiDrawMenu(true); }
-    if (uiBtnPressedEvt(ui_bBack)) { uiEnterStatus(); return; }
-    if (uiBtnPressedEvt(ui_bOk)) {
-      if (ui_menuIndex == 0) uiEnterStatus();
-      else uiEnterSettings();
-      return;
-    }
-    return;
-  }
-
-  if (ui_state == UiState::SETTINGS) {
-    UiCatList& cl = ui_cats[ui_catIndex];
-    if (ui_paramIndex >= cl.count) ui_paramIndex = 0;
-    UiParamRef& p = cl.list[ui_paramIndex];
-
-    if (!ui_editing) {
-      if (uiBtnPressedEvt(ui_bUp))   { ui_catIndex = (ui_catIndex == 0) ? ((uint8_t)UiCategory::COUNT - 1) : (ui_catIndex - 1); ui_paramIndex = 0; uiDrawSettings(true); }
-      if (uiBtnPressedEvt(ui_bDown)) { ui_catIndex = (ui_catIndex + 1) % (uint8_t)UiCategory::COUNT; ui_paramIndex = 0; uiDrawSettings(true); }
-
-      if (uiBtnPressedEvt(ui_bLeft))  { ui_paramIndex = (ui_paramIndex == 0) ? (cl.count - 1) : (ui_paramIndex - 1); uiDrawSettings(true); }
-      if (uiBtnPressedEvt(ui_bRight)) { ui_paramIndex = (ui_paramIndex + 1) % cl.count; uiDrawSettings(true); }
-
-      if (uiBtnPressedEvt(ui_bOk)) {
-        ui_editing = true;
-        ui_editOldValue = uiParamGet(p);
-        ui_editOldValid = true;
-        uiDrawSettings(true);
-      }
-
-      if (uiBtnPressedEvt(ui_bBack)) {
-        if (ui_dirty) uiEnterConfirmExit();
-        else uiEnterMenu();
-      }
-      return;
-    }
-
-    // editing
-    if (uiBtnPressedEvt(ui_bOk)) { ui_editing = false; ui_editOldValid = false; uiDrawSettings(true); return; }
-    if (uiBtnPressedEvt(ui_bBack)) { if (ui_editOldValid) uiParamSet(p, ui_editOldValue); ui_editing = false; ui_editOldValid = false; uiDrawSettings(true); return; }
-
-    bool inc = uiBtnPressedEvt(ui_bUp)   || uiBtnRepeatEvt(ui_bUp);
-    bool dec = uiBtnPressedEvt(ui_bDown) || uiBtnRepeatEvt(ui_bDown);
-
-    if (inc || dec) {
-      float step = uiCurrentStepFor(p);
-      float oldV = uiParamGet(p);
-      float v = oldV + (inc ? step : 0) - (dec ? step : 0);
-      uiParamSet(p, v);
-
-      float newV = uiParamGet(p);
-      if (fabsf(newV - oldV) > 0.00001f) {
-        uiTrackChange(p.name, uiParamValueText(p));
-        uiDrawSettings(true);
-      }
-    }
-    return;
-  }
-
-  if (ui_state == UiState::CONFIRM_EXIT) {
-    if (uiBtnPressedEvt(ui_bLeft) || uiBtnPressedEvt(ui_bRight)) { ui_confirmChoice = (ui_confirmChoice == 0) ? 1 : 0; uiDrawConfirmExit(true); }
-    if (uiBtnPressedEvt(ui_bBack)) { ui_state = UiState::SETTINGS; uiDrawSettings(true); return; }
-    if (uiBtnPressedEvt(ui_bOk)) {
-      if (ui_confirmChoice == 1) uiSaveChangesAndNotify();
-      else uiDiscardChanges();
-      uiEnterMenu();
-      return;
-    }
-  }
+  ui_editParam = nullptr;
+  ui_editDirty = false;
+  uiEnter(UiScreen::SETTINGS);
 }
 
 // =====================
-// TFT init
+// Telegram - minimal (senin v9.010 komutların aynı mantık)
 // =====================
-static void tftInit() {
-  SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
-
-  if (PIN_TFT_BL >= 0) {
-    pinMode((uint8_t)PIN_TFT_BL, OUTPUT);
-    digitalWrite((uint8_t)PIN_TFT_BL, TFT_BL_ACTIVE_LEVEL);
-  }
-
-  tft.begin();
-  tft.setRotation(TFT_ROTATION);
-  tft.fillScreen(ILI9341_BLACK);
-  uiTftHeader(String(DEVICE_NAME), String(PROJECT_VERSION));
-  uiTftLine(40, "TFT UI hazir", ILI9341_GREEN);
-  uiTftSmall(80, "OK=Menu  L/R=Sayfa");
+static String normalizeCommand(const String& textRaw) {
+  String t = textRaw;
+  t.trim();
+  int sp = t.indexOf(' ');
+  if (sp >= 0) t = t.substring(0, sp);
+  int at = t.indexOf('@');
+  if (at >= 0) t = t.substring(0, at);
+  t.toLowerCase();
+  return t;
 }
 
-// =====================
-// Telegram Auth + Status
-// =====================
+static String getArg1(const String& textRaw) {
+  String t = textRaw;
+  t.trim();
+  int sp = t.indexOf(' ');
+  if (sp < 0) return "";
+  String a = t.substring(sp + 1);
+  a.trim();
+  return a;
+}
+
 static bool isAuthorized(const telegramMessage& msg) {
   if (msg.chat_id == String(CHAT_ID)) return true;
   long fromId = msg.from_id.toInt();
   return (fromId == MASTER_ADMIN_ID);
 }
 
-static String buildBootReport() {
+static String buildStatusText() {
   String s;
   s += String(DEVICE_NAME) + "\n";
   s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
@@ -1501,15 +1519,15 @@ static String buildBootReport() {
   s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + "V (" + battStateToText(g_genBattState) + ")\n";
   s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + "V (" + battStateToText(g_camBattState) + ")\n";
   s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
+  s += "⛽ Fuel=" + String(g_fuelOn ? "ON" : "OFF") + "\n";
   return s;
 }
-
-static String buildStatusText() { return buildBootReport(); }
 
 static void handleManualStart(const String& chatId) {
   if (g_mode == MODE_AUTO) { bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", ""); return; }
   if (isGenRunningNow())   { bot.sendMessage(chatId, "✅ Jeneratör zaten çalışıyor. Start yapılmadı.", ""); return; }
   if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
+
   startSeqBegin(true);
   bot.sendMessage(chatId, "🟡 MANUAL: Start sekansı başladı.", "");
 }
@@ -1519,10 +1537,15 @@ static void handleManualStop(const String& chatId) {
   if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
 
   if (!isGenRunningNow()) {
-    if (g_fuelOn) { safeSetFuel(false); bot.sendMessage(chatId, "✅ Jeneratör zaten durmuş. ⛽ Fuel OFF yapıldı.", ""); }
-    else bot.sendMessage(chatId, "✅ Jeneratör zaten durmuş. Stop yapılmadı.", "");
+    if (g_fuelOn) {
+      safeSetFuel(false);
+      bot.sendMessage(chatId, "✅ Jeneratör zaten durmuş. ⛽ Fuel OFF yapıldı. Stop yapılmadı.", "");
+    } else {
+      bot.sendMessage(chatId, "✅ Jeneratör zaten durmuş. Stop yapılmadı.", "");
+    }
     return;
   }
+
   stopSeqBegin(true);
   bot.sendMessage(chatId, "🟥 MANUAL: Stop sekansı başladı.", "");
 }
@@ -1539,22 +1562,184 @@ static void handleTelegram() {
       String cmd = normalizeCommand(msg.text);
       String arg1 = getArg1(msg.text);
 
-      if (cmd == "/durum" || cmd == "/status") bot.sendMessage(msg.chat_id, buildStatusText(), "");
-      else if (cmd == "/save") { saveSettings(); saveHoursTotal(); bot.sendMessage(msg.chat_id, "✅ Ayarlar + sayaç NVS'ye kaydedildi.", ""); }
-      else if (cmd == "/auto") { g_mode = MODE_AUTO; saveSettings(); bot.sendMessage(msg.chat_id, "✅ Mod: AUTO", ""); }
-      else if (cmd == "/manual") { g_mode = MODE_MANUAL; saveSettings(); bot.sendMessage(msg.chat_id, "✅ Mod: MANUAL", ""); }
-      else if (cmd == "/start") handleManualStart(msg.chat_id);
-      else if (cmd == "/stop")  handleManualStop(msg.chat_id);
-      else if (cmd == "/help" || cmd == "/yardim" || cmd == "/yardım") {
-        bot.sendMessage(msg.chat_id, "Komutlar: /durum /auto /manual /start /stop /save", "");
+      if (cmd == "/durum" || cmd == "/status") {
+        bot.sendMessage(msg.chat_id, buildStatusText(), "");
+
+      } else if (cmd == "/save") {
+        saveSettings();
+        saveHoursTotal();
+        bot.sendMessage(msg.chat_id, "✅ Ayarlar + sayaç NVS'ye kaydedildi.", "");
+
+      } else if (cmd == "/reset_hours") {
+        g_genRunTotalS = 0;
+        saveHoursTotal();
+        bot.sendMessage(msg.chat_id, "✅ Çalışma saati sıfırlandı.", "");
+
+      } else if (cmd == "/ping") {
+        bot.sendMessage(msg.chat_id, "pong ✅", "");
+
+      } else if (cmd == "/auto") {
+        g_mode = MODE_AUTO;
+        saveSettings();
+        bot.sendMessage(msg.chat_id, "✅ Mod: AUTO", "");
+
+      } else if (cmd == "/manual") {
+        g_mode = MODE_MANUAL;
+        saveSettings();
+        bot.sendMessage(msg.chat_id, "✅ Mod: MANUAL", "");
+
+      } else if (cmd == "/start") {
+        handleManualStart(msg.chat_id);
+
+      } else if (cmd == "/stop") {
+        handleManualStop(msg.chat_id);
+
+      } else if (cmd == "/cooldown") {
+        int v = arg1.toInt();
+        if (v <= 0) bot.sendMessage(msg.chat_id, "Kullanım: /cooldown 120 (sn)", "");
+        else {
+          g_set.cooldownS = (uint16_t)constrain(v, 5, 3600);
+          bot.sendMessage(msg.chat_id, "✅ Cooldown=" + String(g_set.cooldownS) + "s (Kaydetmek için /save)", "");
+        }
+
+      } else if (cmd == "/autostart") {
+        float v = arg1.toFloat();
+        if (v <= 0) bot.sendMessage(msg.chat_id, "Kullanım: /autostart 160 (V)", "");
+        else {
+          g_set.autoStartMainsV = v;
+          bot.sendMessage(msg.chat_id, "✅ AutoStart=" + fmt2(g_set.autoStartMainsV) + "V (Kaydetmek için /save)", "");
+        }
+
+      } else if (cmd == "/help" || cmd == "/yardim" || cmd == "/yardım") {
+        String h;
+        h += "Komutlar:\n";
+        h += "/durum\n";
+        h += "/auto /manual\n";
+        h += "/start /stop (sadece MANUAL)\n";
+        h += "/cooldown <sn>\n";
+        h += "/autostart <V>\n";
+        h += "/save /reset_hours /ping\n";
+        bot.sendMessage(msg.chat_id, h, "");
+
       } else {
-        bot.sendMessage(msg.chat_id, "Komut: /durum /auto /manual /start /stop /save", "");
+        bot.sendMessage(msg.chat_id,
+          "Komut: /durum /auto /manual /start /stop /cooldown /autostart /save /reset_hours /ping",
+          "");
       }
     }
 
     numNew = bot.getUpdates(bot.last_message_received + 1);
     if (numNew <= 0) break;
   }
+}
+
+// =====================
+// UI service
+// =====================
+static void uiService() {
+#if USE_TFT
+  if (!tftReady) return;
+
+  if (millis() - tUi < UI_TICK_MS) return;
+  tUi = millis();
+
+  uiScanButtons();
+
+  if (ui_screen == UiScreen::STATUS) {
+    if (uiBtnPressed(ui_bLeft))  { ui_statusPage = (ui_statusPage + 3) % 4; uiDrawStatus(true); }
+    if (uiBtnPressed(ui_bRight)) { ui_statusPage = (ui_statusPage + 1) % 4; uiDrawStatus(true); }
+    if (uiBtnPressed(ui_bOk))    { uiEnter(UiScreen::MENU); return; }
+  }
+  else if (ui_screen == UiScreen::MENU) {
+    if (uiBtnPressed(ui_bUp))   { if (ui_menuIndex > 0) ui_menuIndex--; uiDrawMenu(true); }
+    if (uiBtnPressed(ui_bDown)) { if (ui_menuIndex + 1 < UI_MENU_COUNT) ui_menuIndex++; uiDrawMenu(true); }
+    if (uiBtnPressed(ui_bBack)) { uiEnter(UiScreen::STATUS); return; }
+
+    if (uiBtnPressed(ui_bOk)) {
+      switch (ui_menuIndex) {
+        case 0: uiEnter(UiScreen::SETTINGS); break;
+        case 1:
+          g_mode = (g_mode == MODE_AUTO) ? MODE_MANUAL : MODE_AUTO;
+          saveSettings();
+          notify(String("🎛 Mod değişti: ") + modeText(g_mode));
+          uiDrawMenu(true);
+          break;
+        case 2:
+          if (g_mode == MODE_MANUAL) { startSeqBegin(true); notify("🟡 TFT: MANUAL Start başladı"); }
+          else notify("⚠️ TFT: AUTO modda, start yok");
+          uiDrawMenu(true);
+          break;
+        case 3:
+          if (g_mode == MODE_MANUAL) { stopSeqBegin(true); notify("🟥 TFT: MANUAL Stop başladı"); }
+          else notify("⚠️ TFT: AUTO modda, stop yok");
+          uiDrawMenu(true);
+          break;
+        case 4:
+          g_genRunTotalS = 0;
+          saveHoursTotal();
+          notify("⏱ TFT: Saat sıfırlandı");
+          uiDrawMenu(true);
+          break;
+      }
+    }
+  }
+  else if (ui_screen == UiScreen::SETTINGS) {
+    UiCatList cl = uiGetCatList(ui_cat);
+
+    if (uiBtnPressed(ui_bLeft))  { ui_cat = (UiCategory)((((uint8_t)ui_cat) + (uint8_t)UiCategory::COUNT - 1) % (uint8_t)UiCategory::COUNT); ui_paramIndex = 0; uiDrawSettings(true); }
+    if (uiBtnPressed(ui_bRight)) { ui_cat = (UiCategory)((((uint8_t)ui_cat) + 1) % (uint8_t)UiCategory::COUNT); ui_paramIndex = 0; uiDrawSettings(true); }
+
+    if (uiBtnPressed(ui_bUp))    { if (ui_paramIndex > 0) ui_paramIndex--; uiDrawSettings(true); }
+    if (uiBtnPressed(ui_bDown))  { if (ui_paramIndex + 1 < cl.count) ui_paramIndex++; uiDrawSettings(true); }
+
+    if (uiBtnPressed(ui_bBack))  { uiEnter(UiScreen::MENU); return; }
+    if (uiBtnPressed(ui_bOk))    { uiEnterEdit(); return; }
+  }
+  else if (ui_screen == UiScreen::EDIT) {
+    if (!ui_editParam) { uiEnter(UiScreen::SETTINGS); return; }
+
+    bool inc = uiBtnPressed(ui_bUp)   || uiBtnRepeat(ui_bUp);
+    bool dec = uiBtnPressed(ui_bDown) || uiBtnRepeat(ui_bDown);
+
+    if (inc || dec) {
+      uint32_t held = inc ? uiBtnHeldMs(ui_bUp) : uiBtnHeldMs(ui_bDown);
+      float step = uiStepAccel(*ui_editParam, held);
+      if (dec) step = -step;
+
+      ui_editDraft = constrain(ui_editDraft + step, ui_editParam->minF, ui_editParam->maxF);
+      ui_editDirty = (fabsf(ui_editDraft - ui_editOrig) > 1e-6f);
+      uiDrawEdit(true);
+    }
+
+    if (uiBtnPressed(ui_bBack)) {
+      uiCancelEdit();
+      return;
+    }
+
+    if (uiBtnPressed(ui_bOk)) {
+      if (!ui_editDirty) { // değişmemişse geri
+        uiCancelEdit();
+      } else {
+        uiRequestSaveConfirm();
+      }
+      return;
+    }
+  }
+  else if (ui_screen == UiScreen::CONFIRM) {
+    if (uiBtnPressed(ui_bBack)) {
+      // revert
+      uiParamSetF(*ui_editParam, ui_editOrig);
+      ui_editParam = nullptr;
+      ui_editDirty = false;
+      uiEnter(UiScreen::SETTINGS);
+      return;
+    }
+    if (uiBtnPressed(ui_bOk)) {
+      uiDoSave();
+      return;
+    }
+  }
+#endif
 }
 
 // =====================
@@ -1566,16 +1751,24 @@ void setup() {
 
   analogReadResolution(12);
 
+  loadSettings();
+  relayInit();
+
+#if USE_TFT
+  tftSPI.begin(TFT_SCK, (TFT_MISO == 255 ? -1 : TFT_MISO), TFT_MOSI, TFT_CS);
+  tft.begin();
+  tft.setRotation(TFT_ROTATION);
+  tft.fillScreen(UI_COLOR_BG);
+  tftReady = true;
+#endif
+
+  // Buttons
   uiBtnInit(ui_bLeft,  PIN_BTN_LEFT);
   uiBtnInit(ui_bRight, PIN_BTN_RIGHT);
   uiBtnInit(ui_bUp,    PIN_BTN_UP);
   uiBtnInit(ui_bDown,  PIN_BTN_DOWN);
   uiBtnInit(ui_bBack,  PIN_BTN_BACK);
   uiBtnInit(ui_bOk,    PIN_BTN_OK);
-
-  loadSettings();
-  relayInit();
-  tftInit();
 
   connectWiFi();
   tgClient.setInsecure();
@@ -1589,8 +1782,7 @@ void setup() {
   g_genState   = evalGen(g_meas.genV,   GenState::UNKNOWN);
 
   if (WiFi.status() == WL_CONNECTED) {
-    notify(buildBootReport());
-    notify("ℹ️ Bot hazır. /help");
+    notify(String(DEVICE_NAME) + "\n🔖 " + PROJECT_VERSION + "\nℹ️ Bot hazır. /help");
   }
 
   g_stateAlertsArmed = true;
@@ -1598,32 +1790,37 @@ void setup() {
   tMeasure = millis();
   tSerial  = millis();
   tTgPoll  = millis();
+  tUi      = millis();
   g_lastHoursSaveS = 0;
 
-  uiEnterStatus();
+  uiEnter(UiScreen::STATUS);
 }
 
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     static uint32_t tRetry = 0;
-    if (millis() - tRetry > 5000) { tRetry = millis(); connectWiFi(); }
+    if (millis() - tRetry > 5000) {
+      tRetry = millis();
+      connectWiFi();
+    }
   }
 
   relayPulseService();
   startSeqService();
   stopSeqService();
 
-  uiService();
-
   uint32_t now = millis();
 
   if (now - tMeasure >= MEASURE_MS) {
     tMeasure = now;
+
     readAllMeasurements();
     updateBatteryStatesOnly();
     handleStateAlerts();
     updateGenHoursCounter_1s();
     autoTick_1s();
+
+    if (ui_screen == UiScreen::STATUS) uiDrawStatus(false);
   }
 
   if (now - tSerial >= SERIAL_REPORT_MS) {
@@ -1644,6 +1841,8 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) handleTelegram();
   }
 
-  delay(3);
+  uiService();
+
+  delay(5);
   yield();
 }
