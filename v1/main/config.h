@@ -4,7 +4,12 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v5.002"
+#define PROJECT_VERSION "v5.004"
+
+// =====================
+// Cihaz Adı
+// =====================
+inline constexpr const char* DEVICE_NAME = "Jeneratör köy";
 
 // =====================
 // Serial
@@ -71,7 +76,7 @@ inline constexpr uint16_t AC_SAMPLES  = 800;
 inline constexpr uint16_t AC_US_DELAY = 200;
 
 // =====================
-// Thresholds - MAINS/GEN (Stage 3)
+// Thresholds - MAINS/GEN
 // =====================
 inline constexpr float MAINS_HIGH_V     = 245.0f;
 inline constexpr float MAINS_NORMAL_MIN = 210.0f;
@@ -85,7 +90,7 @@ inline constexpr float GEN_NORMAL_MIN   = 210.0f;
 inline constexpr float GEN_NORMAL_MAX   = 240.0f;
 
 // =====================
-// Thresholds - BATTERY (Stage 4)
+// Thresholds - BATTERY
 // =====================
 inline constexpr float BATT_HIGH_V     = 13.2f;
 inline constexpr float BATT_NORMAL_MIN = 12.2f;
@@ -101,6 +106,6 @@ inline constexpr float HYST_V_BATT = 0.15f;
 // =====================
 // Stage 5 - Çalışma Saat Sayacı
 // =====================
-inline constexpr float   GEN_RUNNING_V          = 160.0f;
+inline constexpr float    GEN_RUNNING_V          = 160.0f;
 inline constexpr uint16_t GEN_RUNNING_CONFIRM_S = 10;
 inline constexpr uint32_t HOURS_SAVE_PERIOD_S   = 60;

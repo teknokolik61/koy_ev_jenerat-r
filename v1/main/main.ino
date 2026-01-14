@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v5.002
+// SÜRÜM v5.004
 // =====================
 
 #include <Arduino.h>
@@ -33,7 +33,6 @@ struct Settings {
   float hystAc;
   float hystBatt;
 
-  // Stage 5
   float genRunningV;
   uint16_t genRunConfirmS;
   uint32_t hoursSavePeriodS;
@@ -53,17 +52,11 @@ static uint32_t btnDownMs = 0;
 // ---------------------
 // State Machines (LOW/HIGH macro çakışmasın diye _V)
 // ---------------------
-enum class MainsState : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
-enum class GenState   : uint8_t { UNKNOWN, OFF, LOW_V, NORMAL, HIGH_V };
 enum class BattState  : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
 
-static MainsState g_mainsState = MainsState::UNKNOWN;
-static GenState   g_genState   = GenState::UNKNOWN;
 static BattState  g_genBattState = BattState::UNKNOWN;
 static BattState  g_camBattState = BattState::UNKNOWN;
 
-static bool g_mainsLatched = false;
-static bool g_genLatched = false;
 static bool g_genBattLatched = false;
 static bool g_camBattLatched = false;
 
@@ -325,6 +318,34 @@ static void updateGenHoursCounter() {
 }
 
 // =====================
+// Boot Report
+// =====================
+static String mainsBootLine(float v) {
+  if (v < g_set.mainsCrit) return "🚨 Şebeke KRİTİK: " + fmt2(v) + "V";
+  if (v < g_set.mainsLow)  return "⚠️ Şebeke DÜŞÜK: " + fmt2(v) + "V";
+  if (v > g_set.mainsHigh) return "⚠️ Şebeke YÜKSEK: " + fmt2(v) + "V";
+  return "✅ Şebeke NORMAL: " + fmt2(v) + "V";
+}
+static String genBootLine(float v) {
+  if (v < g_set.genOff)      return "⛔ Jeneratör OFF: " + fmt2(v) + "V";
+  if (v < g_set.genLow)      return "⚠️ Jeneratör DÜŞÜK: " + fmt2(v) + "V";
+  if (v > g_set.genNormMax)  return "⚠️ Jeneratör YÜKSEK: " + fmt2(v) + "V";
+  return "✅ Jeneratör NORMAL: " + fmt2(v) + "V";
+}
+static String buildBootReport() {
+  String s;
+  s += String(DEVICE_NAME) + "\n";
+  s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
+  s += mainsBootLine(g_meas.mainsV) + "\n";
+  s += genBootLine(g_meas.genV) + "\n";
+  // ✅ Aküler geri geldi (state ile)
+  s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + "V (" + battStateToText(g_genBattState) + ")\n";
+  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + "V (" + battStateToText(g_camBattState) + ")\n";
+  s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
+  return s;
+}
+
+// =====================
 // Telegram
 // =====================
 static bool isAuthorized(const telegramMessage& msg) {
@@ -334,19 +355,14 @@ static bool isAuthorized(const telegramMessage& msg) {
 
 static String buildStatusText() {
   String s;
-  s += "📌 Köy Jeneratör Proje-3\n";
-  s += String("🔖 Sürüm: ") + PROJECT_VERSION + "\n";
-  s += String("⏱ Uptime: ") + String(g_meas.uptimeS) + " sn\n";
-  s += String("📶 RSSI: ") + String(g_meas.wifiRssi) + " dBm\n\n";
-
+  s += String(DEVICE_NAME) + "\n";
+  s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
   s += "🔌 Şebeke: " + fmt2(g_meas.mainsV) + " V\n";
   s += "🟠 Jeneratör: " + fmt2(g_meas.genV) + " V\n";
   s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + " V (" + battStateToText(g_genBattState) + ")\n";
-  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V (" + battStateToText(g_camBattState) + ")\n\n";
-
+  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V (" + battStateToText(g_camBattState) + ")\n";
   s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
   s += String("▶️ Running: ") + (g_genRunning ? "YES" : "NO") + "\n";
-
   return s;
 }
 
@@ -389,15 +405,12 @@ static void readAllMeasurements() {
   g_meas.wifiRssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
   g_meas.uptimeS  = millis() / 1000;
 
-  // ✅ ŞEBEKE geri geldi
   g_meas.mainsV_raw = readAcRmsApprox(PIN_ADC_MAINS, g_set.calMains);
   g_meas.mainsV     = lpf(g_meas.mainsV, g_meas.mainsV_raw, LPF_ALPHA_AC);
 
-  // GEN
   g_meas.genV_raw = readAcRmsApprox(PIN_ADC_GEN, g_set.calGen);
   g_meas.genV     = lpf(g_meas.genV, g_meas.genV_raw, LPF_ALPHA_AC);
 
-  // Batarya
   float vGenAdc = readAdcVoltage(PIN_ADC_GEN_BATT);
   float vCamAdc = readAdcVoltage(PIN_ADC_CAM_BATT);
 
@@ -439,8 +452,17 @@ void setup() {
   connectWiFi();
   tgClient.setInsecure();
 
+  // İlk ölçüm 0.00V olmasın diye iki kez ölç
+  readAllMeasurements();
+  delay(250);
+  readAllMeasurements();
+
+  // Akü state'lerini de ilk boot report'tan önce hesapla (state UNKNOWN kalmasın)
+  g_genBattState = evalBatt(g_meas.genBattV, g_genBattState);
+  g_camBattState = evalBatt(g_meas.camBattV, g_camBattState);
+
   if (WiFi.status() == WL_CONNECTED) {
-    notify(String("✅ Sistem açıldı. Sürüm: ") + PROJECT_VERSION);
+    notify(buildBootReport());
   }
 
   tMeasure = millis();
@@ -468,18 +490,6 @@ void loop() {
     readAllMeasurements();
     handleBatteryNotifications();
     updateGenHoursCounter();
-  }
-
-  if (now - tSerial >= SERIAL_REPORT_MS) {
-    tSerial = now;
-    Serial.print("["); Serial.print(PROJECT_VERSION); Serial.print("] ");
-    Serial.print("Mains="); Serial.print(fmt2(g_meas.mainsV));
-    Serial.print(" Gen="); Serial.print(fmt2(g_meas.genV));
-    Serial.print(" GenBatt="); Serial.print(fmt2(g_meas.genBattV));
-    Serial.print(" CamBatt="); Serial.print(fmt2(g_meas.camBattV));
-    Serial.print(" Run="); Serial.print(g_genRunning ? "YES" : "NO");
-    Serial.print(" Total="); Serial.print(fmtHMS(g_genRunTotalS));
-    Serial.println();
   }
 
   if (now - tTgPoll >= TG_POLL_MS) {
