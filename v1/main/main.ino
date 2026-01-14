@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v8.005
+// SÜRÜM v8.006
 // =====================
 
 #include <Arduino.h>
@@ -19,16 +19,6 @@ Preferences prefs;
 WiFiClientSecure tgClient;
 UniversalTelegramBot bot(BOT_TOKEN, tgClient);
 
-struct Settings {
-  float calMains, calGen, genBattDiv, camBattDiv;
-} g_set;
-
-struct Measurements {
-  float mainsV, genV, genBattV, camBattV;
-  int wifiRssi;
-  uint32_t uptimeS;
-} g_meas;
-
 static uint32_t tTgPoll = 0;
 static uint32_t tSerial = 0;
 static uint32_t tTestSend = 0;
@@ -37,15 +27,8 @@ static bool g_testSendDone = false;
 // =====================
 // Helpers
 // =====================
-static String fmt2(float v) {
-  if (isnan(v) || isinf(v)) return "nan";
-  char b[16];
-  dtostrf(v, 0, 2, b);
-  return String(b);
-}
-
-// "/durum@bot arg" -> "/durum"
 static String normalizeCommand(const String& textRaw) {
+  // "/durum@bot arg" -> "/durum"
   String t = textRaw;
   t.trim();
 
@@ -59,14 +42,6 @@ static String normalizeCommand(const String& textRaw) {
   return t;
 }
 
-static void printLastError(const char* tag) {
-  // UniversalTelegramBot içinde last_error String olarak tutuluyor
-  // (Bazı sürümlerde boş kalabilir; yine de yazdırıyoruz.)
-  Serial.print(tag);
-  Serial.print(" last_error: ");
-  Serial.println(bot.last_error);
-}
-
 static bool tgSendTo(const String& chatId, const String& msg) {
   bool ok = false;
   if (WiFi.status() == WL_CONNECTED) {
@@ -74,8 +49,18 @@ static bool tgSendTo(const String& chatId, const String& msg) {
   }
   Serial.print("[TG] send to "); Serial.print(chatId);
   Serial.print(" => "); Serial.println(ok ? "OK" : "FAIL");
-  printLastError("[TG]");
   return ok;
+}
+
+static void tgSendBootBoth(const String& msg) {
+  // 1) Grup CHAT_ID
+  tgSendTo(String(CHAT_ID), msg);
+
+  // 2) Admin'a özel mesaj denemesi (user chat_id ile aynı olabilir)
+  String adminChat = String(MASTER_ADMIN_ID);
+  if (adminChat != String(CHAT_ID)) {
+    tgSendTo(adminChat, msg);
+  }
 }
 
 static void connectWiFi() {
@@ -100,21 +85,15 @@ static void connectWiFi() {
   }
 }
 
-static void loadMinimalSettings() {
-  prefs.begin(NVS_NAMESPACE, false);
-  g_set.calMains   = prefs.getFloat("calMains", CAL_MAINS);
-  g_set.calGen     = prefs.getFloat("calGen",   CAL_GEN);
-  g_set.genBattDiv = prefs.getFloat("genDiv",   GEN_BATT_DIV_RATIO);
-  g_set.camBattDiv = prefs.getFloat("camDiv",   CAM_BATT_DIV_RATIO);
-}
-
 static String buildStatusText() {
   String s;
   s += String(DEVICE_NAME) + "\n";
   s += "🔖 Sürüm: " + String(PROJECT_VERSION) + " (DBG)\n";
-  s += "WiFi: " + String(WiFi.status() == WL_CONNECTED ? "OK" : "FAIL") + " IP=" + WiFi.localIP().toString() + "\n";
-  s += "CHAT_ID=" + String(CHAT_ID) + "\n";
-  s += "ADMIN_ID=" + String(MASTER_ADMIN_ID) + "\n";
+  s += "WiFi: " + String(WiFi.status() == WL_CONNECTED ? "OK" : "FAIL") + "\n";
+  s += "IP: " + WiFi.localIP().toString() + "\n";
+  s += "CHAT_ID: " + String(CHAT_ID) + "\n";
+  s += "MASTER_ADMIN_ID: " + String(MASTER_ADMIN_ID) + "\n";
+  s += "\nTest komutları: /ping  /myid  /durum\n";
   return s;
 }
 
@@ -123,7 +102,6 @@ static void handleTelegram() {
 
   Serial.print("[TG] getUpdates => ");
   Serial.println(numNew);
-  printLastError("[TG]");
 
   if (numNew <= 0) return;
 
@@ -152,7 +130,6 @@ static void handleTelegram() {
     numNew = bot.getUpdates(bot.last_message_received + 1);
     Serial.print("[TG] getUpdates(loop) => ");
     Serial.println(numNew);
-    printLastError("[TG]");
     if (numNew <= 0) break;
   }
 }
@@ -165,18 +142,17 @@ void setup() {
   Serial.println("=== BOOT ===");
   Serial.print("Version: "); Serial.println(PROJECT_VERSION);
 
-  loadMinimalSettings();
-
-  // TLS (sertifika uğraşmasın)
+  // TLS (sertifika uğraştırmasın)
   tgClient.setInsecure();
 
   connectWiFi();
 
-  // Başlangıç debug mesajı: hem gruba hem admin'e dene
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("[TG] Boot send test starting...");
-    tgSendTo(String(CHAT_ID),   "DBG boot ✅ (grup) | yaz: /ping veya /myid");
-    tgSendTo(String(MASTER_ADMIN_ID), "DBG boot ✅ (ozel) | yaz: /ping veya /myid");
+    Serial.println("[TG] Boot send test...");
+    tgSendBootBoth("DBG boot ✅ | Özelden bot'a /ping yaz. Sonra /myid yaz.");
+    tgSendBootBoth(buildStatusText());
+  } else {
+    Serial.println("[TG] skipped (WiFi not connected)");
   }
 
   tTgPoll = millis();
@@ -207,8 +183,7 @@ void loop() {
     tSerial = now;
     Serial.print("["); Serial.print(PROJECT_VERSION); Serial.print("] ");
     Serial.print("WiFi="); Serial.print(WiFi.status() == WL_CONNECTED ? "OK" : "FAIL");
-    Serial.print(" IP="); Serial.print(WiFi.localIP());
-    Serial.print(" last_err="); Serial.println(bot.last_error);
+    Serial.print(" IP="); Serial.println(WiFi.localIP());
   }
 
   if (now - tTgPoll >= TG_POLL_MS) {
