@@ -4,7 +4,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v3.002"
+#define PROJECT_VERSION "v3.003"
 
 // =====================
 // Serial
@@ -70,7 +70,7 @@ inline constexpr uint16_t AC_SAMPLES  = 800;
 inline constexpr uint16_t AC_US_DELAY = 200;
 
 // =====================
-// Thresholds (Stage 3)
+// Aşama 3: Thresholds
 // =====================
 inline constexpr float MAINS_HIGH_V     = 245.0f;
 inline constexpr float MAINS_NORMAL_MIN = 210.0f;
@@ -83,5 +83,5 @@ inline constexpr float GEN_LOW_V        = 190.0f;
 inline constexpr float GEN_NORMAL_MIN   = 210.0f;
 inline constexpr float GEN_NORMAL_MAX   = 240.0f;
 
-// Histerezis
+// Histerezis (geri dönüş bandı)
 inline constexpr float HYST_V = 5.0f;

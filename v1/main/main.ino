@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v3.002
+// SÜRÜM v3.003
 // =====================
 
 #include <Arduino.h>
@@ -25,6 +25,7 @@ RunMode g_mode = MODE_MANUAL;
 struct Settings {
   float calMains, calGen, genBattDiv, camBattDiv;
 
+  // Aşama 3 thresholds (NVS kalıcı)
   float mainsHigh, mainsNormMin, mainsNormMax, mainsLow, mainsCrit;
   float genOff, genLow, genNormMin, genNormMax;
   float hystV;
@@ -41,12 +42,14 @@ static uint32_t tMeasure = 0, tSerial = 0, tTgPoll = 0;
 static bool lastBtn = true;
 static uint32_t btnDownMs = 0;
 
-enum class MainsState : uint8_t { UNKNOWN, CRITICAL, LOW, NORMAL, HIGH };
-enum class GenState   : uint8_t { UNKNOWN, OFF, LOW, NORMAL, HIGH };
+// ✅ LOW/HIGH macro çakışmasını önlemek için isimler değişti
+enum class MainsState : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
+enum class GenState   : uint8_t { UNKNOWN, OFF, LOW_V, NORMAL, HIGH_V };
 
 static MainsState g_mainsState = MainsState::UNKNOWN;
 static GenState   g_genState   = GenState::UNKNOWN;
 
+// latch: aynı state tekrar tekrar mesaj atmasın
 static bool g_mainsLatched = false;
 static bool g_genLatched   = false;
 
@@ -157,7 +160,7 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
   return vrms;
 }
 
-// UniversalTelegramBot sürümüne göre struct adı telegramMessage
+// UniversalTelegramBot struct adı telegramMessage
 static bool isAuthorized(const telegramMessage& msg) {
   long fromId = msg.from_id.toInt();
   return (fromId == MASTER_ADMIN_ID);
@@ -170,18 +173,18 @@ static void notify(const String& msg) {
 static String mainsStateToText(MainsState st) {
   switch (st) {
     case MainsState::CRITICAL: return "CRITICAL";
-    case MainsState::LOW:      return "LOW";
+    case MainsState::LOW_V:    return "LOW";
     case MainsState::NORMAL:   return "NORMAL";
-    case MainsState::HIGH:     return "HIGH";
+    case MainsState::HIGH_V:   return "HIGH";
     default:                   return "UNKNOWN";
   }
 }
 static String genStateToText(GenState st) {
   switch (st) {
     case GenState::OFF:    return "OFF";
-    case GenState::LOW:    return "LOW";
+    case GenState::LOW_V:  return "LOW";
     case GenState::NORMAL: return "NORMAL";
-    case GenState::HIGH:   return "HIGH";
+    case GenState::HIGH_V: return "HIGH";
     default:               return "UNKNOWN";
   }
 }
@@ -215,29 +218,29 @@ static MainsState evalMains(float v) {
   float h = g_set.hystV;
 
   switch (g_mainsState) {
-    case MainsState::HIGH:
+    case MainsState::HIGH_V:
       if (v <= g_set.mainsNormMax - h) return MainsState::NORMAL;
-      return MainsState::HIGH;
+      return MainsState::HIGH_V;
 
     case MainsState::NORMAL:
-      if (v >= g_set.mainsHigh) return MainsState::HIGH;
+      if (v >= g_set.mainsHigh) return MainsState::HIGH_V;
       if (v <  g_set.mainsCrit) return MainsState::CRITICAL;
-      if (v <  g_set.mainsLow)  return MainsState::LOW;
+      if (v <  g_set.mainsLow)  return MainsState::LOW_V;
       return MainsState::NORMAL;
 
-    case MainsState::LOW:
+    case MainsState::LOW_V:
       if (v >= g_set.mainsNormMin + h) return MainsState::NORMAL;
       if (v <  g_set.mainsCrit)        return MainsState::CRITICAL;
-      return MainsState::LOW;
+      return MainsState::LOW_V;
 
     case MainsState::CRITICAL:
-      if (v >= g_set.mainsLow + h) return MainsState::LOW;
+      if (v >= g_set.mainsLow + h) return MainsState::LOW_V;
       return MainsState::CRITICAL;
 
     default:
-      if (v >= g_set.mainsHigh) return MainsState::HIGH;
+      if (v >= g_set.mainsHigh) return MainsState::HIGH_V;
       if (v <  g_set.mainsCrit) return MainsState::CRITICAL;
-      if (v <  g_set.mainsLow)  return MainsState::LOW;
+      if (v <  g_set.mainsLow)  return MainsState::LOW_V;
       return MainsState::NORMAL;
   }
 }
@@ -247,56 +250,59 @@ static GenState evalGen(float v) {
 
   switch (g_genState) {
     case GenState::OFF:
-      if (v >= g_set.genOff + h) return GenState::LOW;
+      if (v >= g_set.genOff + h) return GenState::LOW_V;
       return GenState::OFF;
 
-    case GenState::LOW:
+    case GenState::LOW_V:
       if (v <  g_set.genOff)         return GenState::OFF;
       if (v >= g_set.genNormMin + h) return GenState::NORMAL;
-      return GenState::LOW;
+      return GenState::LOW_V;
 
     case GenState::NORMAL:
       if (v <  g_set.genOff)     return GenState::OFF;
-      if (v <  g_set.genLow)     return GenState::LOW;
-      if (v >  g_set.genNormMax) return GenState::HIGH;
+      if (v <  g_set.genLow)     return GenState::LOW_V;
+      if (v >  g_set.genNormMax) return GenState::HIGH_V;
       return GenState::NORMAL;
 
-    case GenState::HIGH:
+    case GenState::HIGH_V:
       if (v <= g_set.genNormMax - h) return GenState::NORMAL;
-      return GenState::HIGH;
+      return GenState::HIGH_V;
 
     default:
       if (v < g_set.genOff) return GenState::OFF;
-      if (v < g_set.genLow) return GenState::LOW;
-      if (v > g_set.genNormMax) return GenState::HIGH;
+      if (v < g_set.genLow) return GenState::LOW_V;
+      if (v > g_set.genNormMax) return GenState::HIGH_V;
       return GenState::NORMAL;
   }
 }
 
 static void handleStateNotifications() {
+  // mains
   MainsState newM = evalMains(g_meas.mainsV);
   if (newM != g_mainsState) { g_mainsState = newM; g_mainsLatched = false; }
+
   if (!g_mainsLatched) {
     g_mainsLatched = true;
     if (g_mainsState == MainsState::CRITICAL) notify("🚨 Şebeke KRİTİK: " + fmt2(g_meas.mainsV) + "V");
-    else if (g_mainsState == MainsState::LOW) notify("⚠️ Şebeke DÜŞÜK: " + fmt2(g_meas.mainsV) + "V");
-    else if (g_mainsState == MainsState::HIGH) notify("⚠️ Şebeke YÜKSEK: " + fmt2(g_meas.mainsV) + "V");
+    else if (g_mainsState == MainsState::LOW_V) notify("⚠️ Şebeke DÜŞÜK: " + fmt2(g_meas.mainsV) + "V");
+    else if (g_mainsState == MainsState::HIGH_V) notify("⚠️ Şebeke YÜKSEK: " + fmt2(g_meas.mainsV) + "V");
     else if (g_mainsState == MainsState::NORMAL) notify("✅ Şebeke NORMAL: " + fmt2(g_meas.mainsV) + "V");
   }
 
+  // gen
   GenState newG = evalGen(g_meas.genV);
   if (newG != g_genState) { g_genState = newG; g_genLatched = false; }
+
   if (!g_genLatched) {
     g_genLatched = true;
     if (g_genState == GenState::OFF) notify("⛔ Jeneratör OFF: " + fmt2(g_meas.genV) + "V");
-    else if (g_genState == GenState::LOW) notify("⚠️ Jeneratör DÜŞÜK: " + fmt2(g_meas.genV) + "V");
-    else if (g_genState == GenState::HIGH) notify("⚠️ Jeneratör YÜKSEK: " + fmt2(g_meas.genV) + "V");
+    else if (g_genState == GenState::LOW_V) notify("⚠️ Jeneratör DÜŞÜK: " + fmt2(g_meas.genV) + "V");
+    else if (g_genState == GenState::HIGH_V) notify("⚠️ Jeneratör YÜKSEK: " + fmt2(g_meas.genV) + "V");
     else if (g_genState == GenState::NORMAL) notify("✅ Jeneratör NORMAL: " + fmt2(g_meas.genV) + "V");
   }
 }
 
 static void handleTelegram() {
-  // ✅ FIX: getUpdates() hata durumunda -1 dönebilir. while(numNew) KİLİTLER.
   int numNew = bot.getUpdates(bot.last_message_received + 1);
   if (numNew <= 0) return;
 
@@ -327,7 +333,7 @@ static void handleTelegram() {
     }
 
     numNew = bot.getUpdates(bot.last_message_received + 1);
-    if (numNew <= 0) break; // ✅ FIX
+    if (numNew <= 0) break;
   }
 }
 
@@ -363,6 +369,7 @@ static void handleSaveButton() {
       notify("💾 Buton: Ayarlar NVS'ye kaydedildi.");
     }
   }
+
   lastBtn = btn;
 }
 
