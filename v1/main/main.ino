@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v8.008
+// SÜRÜM v9.001  (Aşama 9: Manuel/Oto + Cooldown + AutoStart/Stop)
 // =====================
 
 #include <Arduino.h>
@@ -37,6 +37,15 @@ struct Settings {
   float genRunningV;
   uint16_t genRunConfirmS;
   uint32_t hoursSavePeriodS;
+
+  // Stage 9 (AUTO + COOLDOWN)
+  float    autoStartMainsV;      // Şebeke bu değerin altına düşerse (confirm sonrası) oto start
+  uint16_t mainsFailConfirmS;    // Şebeke düşük kalma doğrulama
+  uint16_t mainsReturnConfirmS;  // Şebeke normale dönme doğrulama (stop'a geçmek için)
+  uint16_t cooldownS;            // Stop öncesi boşta çalışma süresi
+  uint16_t startPulseMs;         // Marş rölesi basma süresi
+  uint16_t stopPulseMs;          // Stop rölesi basma süresi
+  uint8_t  startMaxAttempts;     // Max marş denemesi
 } g_set;
 
 struct Measurements {
@@ -77,6 +86,20 @@ static uint16_t g_genRunStreakS = 0;
 static uint64_t g_genRunTotalS  = 0;
 static uint32_t g_lastHoursSaveS = 0;
 
+// ---------------------
+// Stage 9 - AUTO State Machine
+// ---------------------
+enum class AutoState : uint8_t { IDLE, WAIT_FAIL_CONFIRM, STARTING, RUNNING, WAIT_RETURN_CONFIRM, COOLDOWN, STOPPING, FAULT };
+static AutoState g_autoState = AutoState::IDLE;
+
+static uint32_t g_autoT0 = 0;            // generic timer ms
+static uint16_t g_failStreakS = 0;
+static uint16_t g_returnStreakS = 0;
+static uint8_t  g_startAttempt = 0;
+
+static bool g_pulseActive = false;
+static uint32_t g_pulseUntilMs = 0;
+
 // =====================
 // Helpers
 // =====================
@@ -115,6 +138,16 @@ static String normalizeCommand(const String& textRaw) {
   return t;
 }
 
+static String getArg1(const String& textRaw) {
+  String t = textRaw;
+  t.trim();
+  int sp = t.indexOf(' ');
+  if (sp < 0) return "";
+  String a = t.substring(sp + 1);
+  a.trim();
+  return a;
+}
+
 static void notifyTo(const String& chatId, const String& msg) {
   if (WiFi.status() == WL_CONNECTED) bot.sendMessage(chatId, msg, "");
 }
@@ -132,6 +165,68 @@ static void connectWiFi() {
     delay(250);
     yield();
   }
+}
+
+static const char* modeText(RunMode m) {
+  return (m == MODE_AUTO) ? "AUTO" : "MANUAL";
+}
+
+static const char* autoStateText(AutoState st) {
+  switch (st) {
+    case AutoState::IDLE:               return "IDLE";
+    case AutoState::WAIT_FAIL_CONFIRM:  return "WAIT_FAIL_CONFIRM";
+    case AutoState::STARTING:           return "STARTING";
+    case AutoState::RUNNING:            return "RUNNING";
+    case AutoState::WAIT_RETURN_CONFIRM:return "WAIT_RETURN_CONFIRM";
+    case AutoState::COOLDOWN:           return "COOLDOWN";
+    case AutoState::STOPPING:           return "STOPPING";
+    case AutoState::FAULT:              return "FAULT";
+    default:                            return "UNKNOWN";
+  }
+}
+
+// =====================
+// Relay Control (Stage 9)
+// =====================
+static void relayInit() {
+#if ENABLE_RELAY_CONTROL
+  pinMode(PIN_RELAY_START, OUTPUT);
+  pinMode(PIN_RELAY_STOP,  OUTPUT);
+  digitalWrite(PIN_RELAY_START, RELAY_IDLE_LEVEL);
+  digitalWrite(PIN_RELAY_STOP,  RELAY_IDLE_LEVEL);
+#endif
+}
+
+static void relayPulseStart(uint16_t ms) {
+#if ENABLE_RELAY_CONTROL
+  // pulse start pin active for ms
+  digitalWrite(PIN_RELAY_START, RELAY_ACTIVE_LEVEL);
+  g_pulseActive = true;
+  g_pulseUntilMs = millis() + ms;
+#else
+  (void)ms;
+#endif
+}
+
+static void relayPulseStop(uint16_t ms) {
+#if ENABLE_RELAY_CONTROL
+  digitalWrite(PIN_RELAY_STOP, RELAY_ACTIVE_LEVEL);
+  g_pulseActive = true;
+  g_pulseUntilMs = millis() + ms;
+#else
+  (void)ms;
+#endif
+}
+
+static void relayPulseService() {
+#if ENABLE_RELAY_CONTROL
+  if (!g_pulseActive) return;
+  if ((int32_t)(millis() - g_pulseUntilMs) >= 0) {
+    digitalWrite(PIN_RELAY_START, RELAY_IDLE_LEVEL);
+    digitalWrite(PIN_RELAY_STOP,  RELAY_IDLE_LEVEL);
+    g_pulseActive = false;
+  }
+#endif
 }
 
 // =====================
@@ -169,6 +264,15 @@ static void loadSettings() {
   g_set.genRunConfirmS   = prefs.getUShort("gRunC", GEN_RUNNING_CONFIRM_S);
   g_set.hoursSavePeriodS = prefs.getUInt("hSaveP", HOURS_SAVE_PERIOD_S);
 
+  // Stage 9
+  g_set.autoStartMainsV     = prefs.getFloat("aMnsV", AUTO_START_MAINS_V);
+  g_set.mainsFailConfirmS   = prefs.getUShort("aFail", MAINS_FAIL_CONFIRM_S);
+  g_set.mainsReturnConfirmS = prefs.getUShort("aRet",  MAINS_RETURN_CONFIRM_S);
+  g_set.cooldownS           = prefs.getUShort("aCool", COOLDOWN_S);
+  g_set.startPulseMs        = prefs.getUShort("aStP",  START_PULSE_MS);
+  g_set.stopPulseMs         = prefs.getUShort("aSpP",  STOP_PULSE_MS);
+  g_set.startMaxAttempts    = prefs.getUChar ("aAtt",  START_MAX_ATTEMPTS);
+
   g_mode = (RunMode)prefs.getUChar("mode", (uint8_t)MODE_MANUAL);
 
   // total hours load (64-bit safe: two uint32)
@@ -205,6 +309,15 @@ static void saveSettings() {
   prefs.putFloat("gRunV", g_set.genRunningV);
   prefs.putUShort("gRunC", g_set.genRunConfirmS);
   prefs.putUInt("hSaveP", g_set.hoursSavePeriodS);
+
+  // Stage 9
+  prefs.putFloat("aMnsV", g_set.autoStartMainsV);
+  prefs.putUShort("aFail", g_set.mainsFailConfirmS);
+  prefs.putUShort("aRet",  g_set.mainsReturnConfirmS);
+  prefs.putUShort("aCool", g_set.cooldownS);
+  prefs.putUShort("aStP",  g_set.startPulseMs);
+  prefs.putUShort("aSpP",  g_set.stopPulseMs);
+  prefs.putUChar ("aAtt",  g_set.startMaxAttempts);
 
   prefs.putUChar("mode", (uint8_t)g_mode);
 }
@@ -436,12 +549,183 @@ static void updateGenHoursCounter_1s() {
 }
 
 // =====================
+// Stage 9 - AUTO logic (1Hz tick)
+// =====================
+static bool mainsIsBadForAuto() {
+  // Auto start kriteri: şebeke bu değerin altı
+  return (g_meas.mainsV < g_set.autoStartMainsV);
+}
+
+static bool mainsIsGoodToStop() {
+  // Stop kriteri: şebeke NORMAL bandında
+  return (g_meas.mainsV >= g_set.mainsNormMin && g_meas.mainsV <= g_set.mainsNormMax);
+}
+
+static void autoResetCounters() {
+  g_failStreakS = 0;
+  g_returnStreakS = 0;
+}
+
+static void autoSetState(AutoState st, const String& reasonMsg = "") {
+  if (st == g_autoState) return;
+  g_autoState = st;
+  if (reasonMsg.length()) notify("🤖 AUTO: " + String(autoStateText(g_autoState)) + " — " + reasonMsg);
+  else                    notify("🤖 AUTO: " + String(autoStateText(g_autoState)));
+}
+
+static void autoTick_1s() {
+  if (g_mode != MODE_AUTO) {
+    // Auto kapalıyken state'i temiz tut
+    if (g_autoState != AutoState::IDLE) {
+      g_autoState = AutoState::IDLE;
+      autoResetCounters();
+      g_startAttempt = 0;
+    }
+    return;
+  }
+
+  // Auto açık
+  switch (g_autoState) {
+    case AutoState::IDLE: {
+      autoResetCounters();
+      g_startAttempt = 0;
+
+      if (!g_genRunning && mainsIsBadForAuto()) {
+        g_failStreakS = 1;
+        autoSetState(AutoState::WAIT_FAIL_CONFIRM, "Şebeke düşük, doğrulama başlıyor");
+      }
+      break;
+    }
+
+    case AutoState::WAIT_FAIL_CONFIRM: {
+      if (g_genRunning) {
+        autoSetState(AutoState::RUNNING, "Jeneratör zaten çalışıyor");
+        break;
+      }
+      if (mainsIsBadForAuto()) {
+        if (g_failStreakS < 65000) g_failStreakS++;
+      } else {
+        autoSetState(AutoState::IDLE, "Şebeke normale döndü (iptal)");
+        break;
+      }
+
+      if (g_failStreakS >= g_set.mainsFailConfirmS) {
+        autoSetState(AutoState::STARTING, "Oto start");
+        g_autoT0 = millis();
+        g_startAttempt = 0;
+      }
+      break;
+    }
+
+    case AutoState::STARTING: {
+      if (g_genRunning) {
+        autoSetState(AutoState::RUNNING, "Çalışma tespit edildi");
+        break;
+      }
+
+      // Pulse aktifken yeni pulse verme
+      if (g_pulseActive) break;
+
+      if (g_startAttempt >= g_set.startMaxAttempts) {
+        autoSetState(AutoState::FAULT, "Start denemeleri bitti");
+        break;
+      }
+
+      // Her denemede bir pulse
+      g_startAttempt++;
+      relayPulseStart(g_set.startPulseMs);
+      notify("🟡 Start pulse (" + String(g_startAttempt) + "/" + String(g_set.startMaxAttempts) + ")");
+
+      // Denemeler arası bekleme: START_RETRY_GAP_MS
+      g_autoT0 = millis();
+      break;
+    }
+
+    case AutoState::RUNNING: {
+      // Şebeke normale dönünce stop doğrulamasına geç
+      if (mainsIsGoodToStop()) {
+        g_returnStreakS = 1;
+        autoSetState(AutoState::WAIT_RETURN_CONFIRM, "Şebeke normal, stop doğrulama");
+      }
+      break;
+    }
+
+    case AutoState::WAIT_RETURN_CONFIRM: {
+      if (!g_genRunning) {
+        autoSetState(AutoState::IDLE, "Jeneratör zaten durmuş");
+        break;
+      }
+
+      if (mainsIsGoodToStop()) {
+        if (g_returnStreakS < 65000) g_returnStreakS++;
+      } else {
+        // Şebeke tekrar bozulduysa tekrar RUNNING
+        autoSetState(AutoState::RUNNING, "Şebeke tekrar bozuldu (iptal)");
+        break;
+      }
+
+      if (g_returnStreakS >= g_set.mainsReturnConfirmS) {
+        autoSetState(AutoState::COOLDOWN, "Cooldown başlıyor");
+        g_autoT0 = millis();
+      }
+      break;
+    }
+
+    case AutoState::COOLDOWN: {
+      if (!g_genRunning) {
+        autoSetState(AutoState::IDLE, "Jeneratör cooldown bitmeden durmuş");
+        break;
+      }
+      uint32_t elapsed = (millis() - g_autoT0) / 1000UL;
+      if (elapsed >= g_set.cooldownS) {
+        autoSetState(AutoState::STOPPING, "Stop veriliyor");
+      }
+      break;
+    }
+
+    case AutoState::STOPPING: {
+      if (!g_genRunning) {
+        autoSetState(AutoState::IDLE, "Stop sonrası durdu");
+        break;
+      }
+      if (g_pulseActive) break;
+
+      relayPulseStop(g_set.stopPulseMs);
+      notify("🟥 Stop pulse");
+
+      // Stop verdikten sonra bir sonraki tick’te genRunning düşene kadar bekle
+      break;
+    }
+
+    case AutoState::FAULT:
+    default:
+      // Fault durumunda manuel müdahale / mode değişimi beklenir
+      break;
+  }
+}
+
+// STARTING state: pulse arası gap yönetimi (non-block)
+static void autoStartingService() {
+  if (g_autoState != AutoState::STARTING) return;
+  if (g_genRunning) return;
+  if (g_pulseActive) return;
+
+  // denemeler arası bekleme
+  if ((int32_t)(millis() - g_autoT0) < (int32_t)START_RETRY_GAP_MS) return;
+
+  // sıra tekrar autoTick_1s içinde pulse verecek (startAttempt arttırıp)
+  // burada sadece "hazırım" mantığı var. (autoTick_1s çağrısı 1Hz olduğu için yeterli)
+}
+
+// =====================
 // Boot Report
 // =====================
 static String buildBootReport() {
   String s;
   s += String(DEVICE_NAME) + "\n";
   s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
+  s += "🎛 Mod: " + String(modeText(g_mode)) + "\n";
+  s += "🤖 AutoState: " + String(autoStateText(g_autoState)) + "\n";
   s += mainsStateLine(g_mainsState, g_meas.mainsV) + "\n";
   s += genStateLine(g_genState, g_meas.genV) + "\n";
   s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + "V (" + battStateToText(g_genBattState) + ")\n";
@@ -454,17 +738,27 @@ static String buildBootReport() {
 // Telegram auth
 // =====================
 static bool isAuthorized(const telegramMessage& msg) {
-  // 1) Doğru gruptan geliyorsa izin ver
   if (msg.chat_id == String(CHAT_ID)) return true;
-
-  // 2) Ya da admin id eşleşiyorsa izin ver
   long fromId = msg.from_id.toInt();
   return (fromId == MASTER_ADMIN_ID);
 }
 
 static String buildStatusText() {
-  // Aynı format: aküler /durum içinde var; ayrı mesaj yok
   return buildBootReport();
+}
+
+static void handleManualStartStop(const String& chatId, bool start) {
+  if (g_mode == MODE_AUTO) {
+    bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", "");
+    return;
+  }
+  if (start) {
+    relayPulseStart(g_set.startPulseMs);
+    bot.sendMessage(chatId, "🟡 Manuel START pulse gönderildi.", "");
+  } else {
+    relayPulseStop(g_set.stopPulseMs);
+    bot.sendMessage(chatId, "🟥 Manuel STOP pulse gönderildi.", "");
+  }
 }
 
 static void handleTelegram() {
@@ -477,21 +771,77 @@ static void handleTelegram() {
       if (!isAuthorized(msg)) continue;
 
       String cmd = normalizeCommand(msg.text);
+      String arg1 = getArg1(msg.text);
 
       if (cmd == "/durum" || cmd == "/status") {
         bot.sendMessage(msg.chat_id, buildStatusText(), "");
+
       } else if (cmd == "/save") {
         saveSettings();
         saveHoursTotal();
         bot.sendMessage(msg.chat_id, "✅ Ayarlar + sayaç NVS'ye kaydedildi.", "");
+
       } else if (cmd == "/reset_hours") {
         g_genRunTotalS = 0;
         saveHoursTotal();
         bot.sendMessage(msg.chat_id, "✅ Çalışma saati sıfırlandı.", "");
+
       } else if (cmd == "/ping") {
         bot.sendMessage(msg.chat_id, "pong ✅", "");
+
+      // ---- Stage 9 commands
+      } else if (cmd == "/auto") {
+        g_mode = MODE_AUTO;
+        saveSettings();
+        bot.sendMessage(msg.chat_id, "✅ Mod: AUTO", "");
+
+      } else if (cmd == "/manual") {
+        g_mode = MODE_MANUAL;
+        saveSettings();
+        bot.sendMessage(msg.chat_id, "✅ Mod: MANUAL", "");
+
+      } else if (cmd == "/mode") {
+        bot.sendMessage(msg.chat_id, "🎛 Mod: " + String(modeText(g_mode)) + "\n🤖 AutoState: " + String(autoStateText(g_autoState)), "");
+
+      } else if (cmd == "/start") {
+        handleManualStartStop(msg.chat_id, true);
+
+      } else if (cmd == "/stop") {
+        handleManualStartStop(msg.chat_id, false);
+
+      } else if (cmd == "/cooldown") {
+        // /cooldown 120
+        int v = arg1.toInt();
+        if (v <= 0) {
+          bot.sendMessage(msg.chat_id, "Kullanım: /cooldown 120  (saniye)", "");
+        } else {
+          g_set.cooldownS = (uint16_t)constrain(v, 5, 3600);
+          bot.sendMessage(msg.chat_id, "✅ Cooldown = " + String(g_set.cooldownS) + "s (Kaydetmek için /save)", "");
+        }
+
+      } else if (cmd == "/autostart") {
+        // /autostart 160
+        float v = arg1.toFloat();
+        if (v <= 0) {
+          bot.sendMessage(msg.chat_id, "Kullanım: /autostart 160  (V)", "");
+        } else {
+          g_set.autoStartMainsV = v;
+          bot.sendMessage(msg.chat_id, "✅ AutoStart eşiği = " + fmt2(g_set.autoStartMainsV) + "V (Kaydetmek için /save)", "");
+        }
+
+      } else if (cmd == "/help" || cmd == "/yardim" || cmd == "/yardım") {
+        String h;
+        h += "Komutlar:\n";
+        h += "/durum\n";
+        h += "/mode  /auto  /manual\n";
+        h += "/cooldown <sn>\n";
+        h += "/autostart <V>\n";
+        h += "/start /stop (sadece MANUAL)\n";
+        h += "/save  /reset_hours  /ping\n";
+        bot.sendMessage(msg.chat_id, h, "");
+
       } else {
-        bot.sendMessage(msg.chat_id, "Komut: /durum /save /reset_hours /ping", "");
+        bot.sendMessage(msg.chat_id, "Komut: /durum /mode /auto /manual /cooldown /autostart /start /stop /save /reset_hours /ping", "");
       }
     }
 
@@ -551,6 +901,8 @@ void setup() {
   pinMode(PIN_BTN_SAVE, INPUT_PULLUP);
 
   loadSettings();
+  relayInit();
+
   connectWiFi();
   tgClient.setInsecure();
 
@@ -566,10 +918,9 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     notify(buildBootReport());
-    notify("ℹ️ Bot hazır. Komutlar: /durum /save /reset_hours /ping");
+    notify("ℹ️ Bot hazır. /help");
   }
 
-  // Boot sonrası state alertleri aç
   g_stateAlertsArmed = true;
 
   tMeasure = millis();
@@ -588,6 +939,7 @@ void loop() {
   }
 
   handleSaveButton();
+  relayPulseService();
 
   uint32_t now = millis();
 
@@ -604,16 +956,23 @@ void loop() {
 
     // çalışma saati
     updateGenHoursCounter_1s();
+
+    // stage 9 auto
+    autoTick_1s();
   }
+
+  // STARTING pulse arası gap için servis
+  autoStartingService();
 
   if (now - tSerial >= SERIAL_REPORT_MS) {
     tSerial = now;
     Serial.print("["); Serial.print(PROJECT_VERSION); Serial.print("] ");
-    Serial.print("Mains="); Serial.print(fmt2(g_meas.mainsV));
+    Serial.print("Mode="); Serial.print(modeText(g_mode));
+    Serial.print(" Auto="); Serial.print(autoStateText(g_autoState));
+    Serial.print(" Mains="); Serial.print(fmt2(g_meas.mainsV));
     Serial.print(" Gen="); Serial.print(fmt2(g_meas.genV));
-    Serial.print(" GenBatt="); Serial.print(fmt2(g_meas.genBattV));
-    Serial.print(" CamBatt="); Serial.print(fmt2(g_meas.camBattV));
     Serial.print(" Run="); Serial.print(g_genRunning ? "YES" : "NO");
+    Serial.print(" Cool="); Serial.print(g_set.cooldownS);
     Serial.print(" Total="); Serial.print(fmtHMS(g_genRunTotalS));
     Serial.println();
   }

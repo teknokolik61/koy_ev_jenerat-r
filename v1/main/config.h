@@ -1,15 +1,15 @@
 // =====================
-// config.h (v8.008)
+// config.h (v9.001)
 // =====================
 #pragma once
 #include <stdint.h>
 
-#include "sifre.h"   // <-- WiFi/Telegram gizli bilgiler burada
+#include "sifre.h"   // WiFi/Telegram gizli bilgiler burada
 
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v8.008"
+#define PROJECT_VERSION "v9.001"
 
 // =====================
 // Cihaz Adı
@@ -33,7 +33,7 @@ inline constexpr bool ENABLE_TG_STATE_ALERTS = true;
 inline constexpr const char* NVS_NAMESPACE = "koygen";
 
 // =====================
-// Pins
+// Pins (ADC)
 // =====================
 inline constexpr uint8_t PIN_ADC_MAINS     = 34;
 inline constexpr uint8_t PIN_ADC_GEN       = 35;
@@ -42,6 +42,23 @@ inline constexpr uint8_t PIN_ADC_CAM_BATT  = 33;
 
 // Save butonu (uzun bas: kaydet)
 inline constexpr uint8_t PIN_BTN_SAVE = 27;
+
+// =====================
+// Stage 9 - Relay Control
+// =====================
+// Donanım bağlayana kadar 0 bırak (yanlışlıkla pulse atmasın).
+#define ENABLE_RELAY_CONTROL 0
+
+// Röle çıkış pinleri (örnek)
+inline constexpr uint8_t PIN_RELAY_START = 25; // marş
+inline constexpr uint8_t PIN_RELAY_STOP  = 26; // stop
+
+// Röle aktif seviyesi (kartına göre değişebilir)
+inline constexpr uint8_t RELAY_ACTIVE_LEVEL = HIGH;
+inline constexpr uint8_t RELAY_IDLE_LEVEL   = LOW;
+
+// START pulse denemeleri arası bekleme
+inline constexpr uint32_t START_RETRY_GAP_MS = 3500;
 
 // =====================
 // ADC & Ölçüm
@@ -106,3 +123,16 @@ inline constexpr float HYST_V_BATT = 0.15f;
 inline constexpr float    GEN_RUNNING_V          = 160.0f;
 inline constexpr uint16_t GEN_RUNNING_CONFIRM_S = 10;
 inline constexpr uint32_t HOURS_SAVE_PERIOD_S   = 60;
+
+// =====================
+// Stage 9 - AUTO defaults
+// =====================
+// Şebeke bu değerin altına inerse (mainsFailConfirmS boyunca) oto start
+inline constexpr float    AUTO_START_MAINS_V      = 160.0f;
+inline constexpr uint16_t MAINS_FAIL_CONFIRM_S    = 15;   // sn
+inline constexpr uint16_t MAINS_RETURN_CONFIRM_S  = 20;   // sn
+inline constexpr uint16_t COOLDOWN_S              = 120;  // sn
+
+inline constexpr uint16_t START_PULSE_MS          = 1200;
+inline constexpr uint16_t STOP_PULSE_MS           = 1000;
+inline constexpr uint8_t  START_MAX_ATTEMPTS      = 3;
