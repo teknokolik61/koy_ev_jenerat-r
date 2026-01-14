@@ -4,7 +4,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v5.004"
+#define PROJECT_VERSION "v5.005"
 
 // =====================
 // Cihaz Adı

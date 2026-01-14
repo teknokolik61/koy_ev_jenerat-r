@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v5.004
+// SÜRÜM v5.005
 // =====================
 
 #include <Arduino.h>
@@ -33,6 +33,7 @@ struct Settings {
   float hystAc;
   float hystBatt;
 
+  // Stage 5
   float genRunningV;
   uint16_t genRunConfirmS;
   uint32_t hoursSavePeriodS;
@@ -50,15 +51,12 @@ static bool lastBtn = true;
 static uint32_t btnDownMs = 0;
 
 // ---------------------
-// State Machines (LOW/HIGH macro çakışmasın diye _V)
+// Battery State
 // ---------------------
-enum class BattState  : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
+enum class BattState : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
 
-static BattState  g_genBattState = BattState::UNKNOWN;
-static BattState  g_camBattState = BattState::UNKNOWN;
-
-static bool g_genBattLatched = false;
-static bool g_camBattLatched = false;
+static BattState g_genBattState = BattState::UNKNOWN;
+static BattState g_camBattState = BattState::UNKNOWN;
 
 // ---------------------
 // Stage 5 - Hours Counter
@@ -135,12 +133,14 @@ static void loadSettings() {
   g_set.hystAc       = prefs.getFloat("hAc",  HYST_V_AC);
   g_set.hystBatt     = prefs.getFloat("hBt",  HYST_V_BATT);
 
+  // Stage 5
   g_set.genRunningV      = prefs.getFloat("gRunV", GEN_RUNNING_V);
   g_set.genRunConfirmS   = prefs.getUShort("gRunC", GEN_RUNNING_CONFIRM_S);
   g_set.hoursSavePeriodS = prefs.getUInt("hSaveP", HOURS_SAVE_PERIOD_S);
 
   g_mode = (RunMode)prefs.getUChar("mode", (uint8_t)MODE_MANUAL);
 
+  // total hours load (64-bit safe as two uint32)
   uint32_t lo = prefs.getUInt("hrsLo", 0);
   uint32_t hi = prefs.getUInt("hrsHi", 0);
   g_genRunTotalS = ((uint64_t)hi << 32) | (uint64_t)lo;
@@ -224,7 +224,7 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
 }
 
 // =====================
-// Battery State
+// Battery State (NO TELEGRAM NOTIFY HERE)
 // =====================
 static String battStateToText(BattState st) {
   switch (st) {
@@ -243,18 +243,22 @@ static BattState evalBatt(float v, BattState prev) {
     case BattState::HIGH_V:
       if (v <= g_set.battHigh - h) return BattState::NORMAL;
       return BattState::HIGH_V;
+
     case BattState::NORMAL:
       if (v >= g_set.battHigh) return BattState::HIGH_V;
       if (v <  g_set.battCrit) return BattState::CRITICAL;
       if (v <  g_set.battLow)  return BattState::LOW_V;
       return BattState::NORMAL;
+
     case BattState::LOW_V:
       if (v >= g_set.battNormMin + h) return BattState::NORMAL;
       if (v <  g_set.battCrit)        return BattState::CRITICAL;
       return BattState::LOW_V;
+
     case BattState::CRITICAL:
       if (v >= g_set.battLow + h) return BattState::LOW_V;
       return BattState::CRITICAL;
+
     default:
       if (v >= g_set.battHigh) return BattState::HIGH_V;
       if (v <  g_set.battCrit) return BattState::CRITICAL;
@@ -263,26 +267,10 @@ static BattState evalBatt(float v, BattState prev) {
   }
 }
 
-static void handleBatteryNotifications() {
-  BattState newGB = evalBatt(g_meas.genBattV, g_genBattState);
-  if (newGB != g_genBattState) { g_genBattState = newGB; g_genBattLatched = false; }
-  if (!g_genBattLatched) {
-    g_genBattLatched = true;
-    if (g_genBattState == BattState::CRITICAL) notify("🚨 Gen Akü KRİTİK: " + fmt2(g_meas.genBattV) + "V");
-    else if (g_genBattState == BattState::LOW_V) notify("⚠️ Gen Akü DÜŞÜK: " + fmt2(g_meas.genBattV) + "V");
-    else if (g_genBattState == BattState::HIGH_V) notify("⚠️ Gen Akü YÜKSEK: " + fmt2(g_meas.genBattV) + "V");
-    else if (g_genBattState == BattState::NORMAL) notify("✅ Gen Akü NORMAL: " + fmt2(g_meas.genBattV) + "V");
-  }
-
-  BattState newCB = evalBatt(g_meas.camBattV, g_camBattState);
-  if (newCB != g_camBattState) { g_camBattState = newCB; g_camBattLatched = false; }
-  if (!g_camBattLatched) {
-    g_camBattLatched = true;
-    if (g_camBattState == BattState::CRITICAL) notify("🚨 Cam Akü KRİTİK: " + fmt2(g_meas.camBattV) + "V");
-    else if (g_camBattState == BattState::LOW_V) notify("⚠️ Cam Akü DÜŞÜK: " + fmt2(g_meas.camBattV) + "V");
-    else if (g_camBattState == BattState::HIGH_V) notify("⚠️ Cam Akü YÜKSEK: " + fmt2(g_meas.camBattV) + "V");
-    else if (g_camBattState == BattState::NORMAL) notify("✅ Cam Akü NORMAL: " + fmt2(g_meas.camBattV) + "V");
-  }
+static void updateBatteryStatesOnly() {
+  // Sadece state hesapla (mesaj yok)
+  g_genBattState = evalBatt(g_meas.genBattV, g_genBattState);
+  g_camBattState = evalBatt(g_meas.camBattV, g_camBattState);
 }
 
 // =====================
@@ -326,19 +314,20 @@ static String mainsBootLine(float v) {
   if (v > g_set.mainsHigh) return "⚠️ Şebeke YÜKSEK: " + fmt2(v) + "V";
   return "✅ Şebeke NORMAL: " + fmt2(v) + "V";
 }
+
 static String genBootLine(float v) {
   if (v < g_set.genOff)      return "⛔ Jeneratör OFF: " + fmt2(v) + "V";
   if (v < g_set.genLow)      return "⚠️ Jeneratör DÜŞÜK: " + fmt2(v) + "V";
   if (v > g_set.genNormMax)  return "⚠️ Jeneratör YÜKSEK: " + fmt2(v) + "V";
   return "✅ Jeneratör NORMAL: " + fmt2(v) + "V";
 }
+
 static String buildBootReport() {
   String s;
   s += String(DEVICE_NAME) + "\n";
   s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
   s += mainsBootLine(g_meas.mainsV) + "\n";
   s += genBootLine(g_meas.genV) + "\n";
-  // ✅ Aküler geri geldi (state ile)
   s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + "V (" + battStateToText(g_genBattState) + ")\n";
   s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + "V (" + battStateToText(g_camBattState) + ")\n";
   s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
@@ -457,9 +446,8 @@ void setup() {
   delay(250);
   readAllMeasurements();
 
-  // Akü state'lerini de ilk boot report'tan önce hesapla (state UNKNOWN kalmasın)
-  g_genBattState = evalBatt(g_meas.genBattV, g_genBattState);
-  g_camBattState = evalBatt(g_meas.camBattV, g_camBattState);
+  // Akü state'lerini hesapla (mesaj atma yok)
+  updateBatteryStatesOnly();
 
   if (WiFi.status() == WL_CONNECTED) {
     notify(buildBootReport());
@@ -488,8 +476,24 @@ void loop() {
     tMeasure = now;
 
     readAllMeasurements();
-    handleBatteryNotifications();
+
+    // ✅ sadece state güncelle (Telegram yok)
+    updateBatteryStatesOnly();
+
+    // çalışma saati
     updateGenHoursCounter();
+  }
+
+  if (now - tSerial >= SERIAL_REPORT_MS) {
+    tSerial = now;
+    Serial.print("["); Serial.print(PROJECT_VERSION); Serial.print("] ");
+    Serial.print("Mains="); Serial.print(fmt2(g_meas.mainsV));
+    Serial.print(" Gen="); Serial.print(fmt2(g_meas.genV));
+    Serial.print(" GenBatt="); Serial.print(fmt2(g_meas.genBattV));
+    Serial.print(" CamBatt="); Serial.print(fmt2(g_meas.camBattV));
+    Serial.print(" Run="); Serial.print(g_genRunning ? "YES" : "NO");
+    Serial.print(" Total="); Serial.print(fmtHMS(g_genRunTotalS));
+    Serial.println();
   }
 
   if (now - tTgPoll >= TG_POLL_MS) {
