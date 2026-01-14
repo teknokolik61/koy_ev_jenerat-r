@@ -4,7 +4,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v1.001"
+#define PROJECT_VERSION "v1.002"
 
 // =====================
 // Serial
@@ -24,7 +24,7 @@ inline constexpr const char* WIFI_SSID = "SSID_YAZ";
 inline constexpr const char* WIFI_PASS = "PASS_YAZ";
 
 inline constexpr const char* BOT_TOKEN = "123456:ABC..."; // Telegram bot token
-inline constexpr const char* CHAT_ID   = "123456789";     // Bildirim gönderilecek chat/grup id
+inline constexpr const char* CHAT_ID   = "123456789";     // Bildirim gidecek chat/grup id
 
 // Telegram user id (sayısal). Sadece bu kişi komut çalıştırır (Aşama 1)
 inline constexpr long MASTER_ADMIN_ID = 123456789;

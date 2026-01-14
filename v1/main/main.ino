@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v1.001
+// SÜRÜM v1.002
 // =====================
 
 #include <Arduino.h>
@@ -122,7 +122,8 @@ static float readAcRmsApprox(uint8_t pin, float calScale, uint16_t samples = 400
   return vrms;
 }
 
-static bool isAuthorized(const TelegramMessage& msg) {
+// DİKKAT: UniversalTelegramBot sürümüne göre struct adı telegramMessage
+static bool isAuthorized(const telegramMessage& msg) {
   long fromId = msg.from_id.toInt();
   return (fromId == MASTER_ADMIN_ID);
 }
@@ -161,7 +162,9 @@ static void handleTelegram() {
   int numNew = bot.getUpdates(bot.last_message_received + 1);
   while (numNew) {
     for (int i = 0; i < numNew; i++) {
-      TelegramMessage& msg = bot.messages[i];
+
+      // DİKKAT: bot.messages[i] tipi telegramMessage
+      telegramMessage& msg = bot.messages[i];
       if (!isAuthorized(msg)) continue;
 
       String text = msg.text;
@@ -222,9 +225,7 @@ static void handleSaveButton() {
   bool btn = digitalRead(PIN_BTN_SAVE); // PULLUP: basılıyken LOW
   uint32_t now = millis();
 
-  if (lastBtn == true && btn == false) {
-    btnDownMs = now;
-  }
+  if (lastBtn == true && btn == false) btnDownMs = now;
 
   if (lastBtn == false && btn == true) {
     uint32_t held = now - btnDownMs;
@@ -244,7 +245,6 @@ void setup() {
   delay(200);
 
   analogReadResolution(12);
-
   pinMode(PIN_BTN_SAVE, INPUT_PULLUP);
 
   Serial.println();
@@ -253,10 +253,9 @@ void setup() {
   Serial.println(PROJECT_VERSION);
 
   loadSettings();
-
   connectWiFi();
 
-  // Telegram TLS
+  // Telegram TLS (kolay kurulum)
   tgClient.setInsecure();
 
   if (WiFi.status() == WL_CONNECTED) {
