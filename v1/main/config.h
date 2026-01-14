@@ -4,7 +4,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v1.002"
+#define PROJECT_VERSION "v2.001"
 
 // =====================
 // Serial
@@ -12,7 +12,7 @@
 inline constexpr uint32_t SERIAL_BAUD = 115200;
 
 // =====================
-// Feature Flags (Aşama 1: altyapı)
+// Feature Flags
 // =====================
 #define USE_LCD 0
 #define USE_DATABASE 0
@@ -28,7 +28,6 @@ inline constexpr const char* CHAT_ID   = "-1003432924253"; // grup chat id
 // Admin (riskli komutlar sadece buna izinli)
 inline constexpr long MASTER_ADMIN_ID = 1253195249; // kendi telegram user id
 
-// Telegram polling
 inline constexpr uint32_t TG_POLL_MS = 1200;
 
 // =====================
@@ -39,13 +38,11 @@ inline constexpr const char* NVS_NAMESPACE = "koygen";
 // =====================
 // Pins (ESP32-WROOM-32D)
 // =====================
-// ADC1 pinleri: 32-39 (WiFi ile uyumlu)
 inline constexpr uint8_t PIN_ADC_MAINS     = 34; // ZMPT101B (şebeke)
 inline constexpr uint8_t PIN_ADC_GEN       = 35; // ZMPT101B (jeneratör)
-inline constexpr uint8_t PIN_ADC_GEN_BATT  = 32; // bölücü (jeneratör akü)
-inline constexpr uint8_t PIN_ADC_CAM_BATT  = 33; // bölücü (kamera akü)
+inline constexpr uint8_t PIN_ADC_GEN_BATT  = 32; // divider (gen akü)
+inline constexpr uint8_t PIN_ADC_CAM_BATT  = 33; // divider (cam akü)
 
-// Buton (ayar kaydet)
 inline constexpr uint8_t PIN_BTN_SAVE = 27; // INPUT_PULLUP
 
 // =====================
@@ -54,15 +51,25 @@ inline constexpr uint8_t PIN_BTN_SAVE = 27; // INPUT_PULLUP
 inline constexpr uint16_t ADC_MAX  = 4095;
 inline constexpr float    ADC_VREF = 3.3f;
 
-// Batarya bölücü oranları (Vbat = Vadc * (R1+R2)/R2)
-// Örn: R1=120k R2=33k -> 4.63636
-inline constexpr float GEN_BATT_DIV_RATIO = 4.63636f;
+// Divider oranları
+inline constexpr float GEN_BATT_DIV_RATIO = 4.63636f; // 120k/33k örnek
 inline constexpr float CAM_BATT_DIV_RATIO = 4.63636f;
 
-// ZMPT101B kalibrasyon (Aşama 1: kaba başlangıç)
+// ZMPT kalibrasyon başlangıç
 inline constexpr float CAL_MAINS = 240.0f;
 inline constexpr float CAL_GEN   = 240.0f;
 
 // Ölçüm periyotları
-inline constexpr uint32_t MEASURE_MS       = 2000;
+inline constexpr uint32_t MEASURE_MS       = 1000;  // Aşama 2: daha sık ölç
 inline constexpr uint32_t SERIAL_REPORT_MS = 2000;
+
+// =====================
+// Filtre ayarları
+// =====================
+// 0..1 arası: küçük -> daha yumuşak ama geç tepki
+inline constexpr float LPF_ALPHA_AC   = 0.15f;
+inline constexpr float LPF_ALPHA_BATT = 0.20f;
+
+// AC RMS örnek sayısı (50Hz için daha iyi stabilite)
+inline constexpr uint16_t AC_SAMPLES = 800; // ~160ms (delayMicroseconds 200 ile)
+inline constexpr uint16_t AC_US_DELAY = 200; // mikro saniye

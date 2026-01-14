@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v1.002
+// SÜRÜM v2.001
 // =====================
 
 #include <Arduino.h>
@@ -30,10 +30,16 @@ struct Settings {
 } g_set;
 
 struct Measurements {
-  float mainsV;
-  float genV;
-  float genBattV;
-  float camBattV;
+  float mainsV_raw;
+  float genV_raw;
+  float genBattV_raw;
+  float camBattV_raw;
+
+  float mainsV;     // filtreli
+  float genV;       // filtreli
+  float genBattV;   // filtreli
+  float camBattV;   // filtreli
+
   int   wifiRssi;
   uint32_t uptimeS;
 } g_meas;
@@ -53,6 +59,11 @@ static String fmt2(float v) {
   char b[16];
   dtostrf(v, 0, 2, b);
   return String(b);
+}
+
+static float lpf(float prev, float x, float a) {
+  if (isnan(prev) || isinf(prev)) return x;
+  return prev + a * (x - prev);
 }
 
 static void loadSettings() {
@@ -85,7 +96,6 @@ static void connectWiFi() {
   }
 }
 
-// DC okuma: çoklu örnek ortalaması
 static float readAdcVoltage(uint8_t pin, uint16_t samples = 64) {
   uint32_t sum = 0;
   for (uint16_t i = 0; i < samples; i++) {
@@ -97,24 +107,26 @@ static float readAdcVoltage(uint8_t pin, uint16_t samples = 64) {
   return (adc / (float)ADC_MAX) * ADC_VREF;
 }
 
-// ZMPT101B için kaba RMS (Aşama 1): offset çıkar + RMS
-static float readAcRmsApprox(uint8_t pin, float calScale, uint16_t samples = 400) {
+// AC RMS ölçüm: offset + RMS (daha uzun pencere)
+static float readAcRmsApprox(uint8_t pin, float calScale) {
+  // mean
   uint32_t sum = 0;
-  for (uint16_t i = 0; i < samples; i++) {
+  for (uint16_t i = 0; i < AC_SAMPLES; i++) {
     sum += analogRead(pin);
-    delayMicroseconds(200);
+    delayMicroseconds(AC_US_DELAY);
     yield();
   }
-  float mean = (float)sum / (float)samples;
+  float mean = (float)sum / (float)AC_SAMPLES;
 
+  // rms
   double sq = 0.0;
-  for (uint16_t i = 0; i < samples; i++) {
+  for (uint16_t i = 0; i < AC_SAMPLES; i++) {
     float x = (float)analogRead(pin) - mean;
     sq += (double)(x * x);
-    delayMicroseconds(200);
+    delayMicroseconds(AC_US_DELAY);
     yield();
   }
-  float rmsCounts = sqrt((float)(sq / (double)samples));
+  float rmsCounts = sqrt((float)(sq / (double)AC_SAMPLES));
   float rmsVadc   = (rmsCounts / (float)ADC_MAX) * ADC_VREF;
 
   float vrms = rmsVadc * calScale;
@@ -122,7 +134,7 @@ static float readAcRmsApprox(uint8_t pin, float calScale, uint16_t samples = 400
   return vrms;
 }
 
-// DİKKAT: UniversalTelegramBot sürümüne göre struct adı telegramMessage
+// UniversalTelegramBot sürümüne göre struct adı telegramMessage
 static bool isAuthorized(const telegramMessage& msg) {
   long fromId = msg.from_id.toInt();
   return (fromId == MASTER_ADMIN_ID);
@@ -145,16 +157,15 @@ static String buildStatusText() {
 
 static String helpText() {
   String h;
-  h += "Komutlar (Aşama 1):\n";
+  h += "Komutlar (Aşama 2):\n";
   h += "/durum  -> ölçümler\n";
-  h += "/auto   -> otomatik moda al\n";
-  h += "/manual -> manuel moda al\n";
-  h += "/save   -> ayarları NVS'ye kaydet\n";
-  h += "/setcalmains <x>  -> şebeke kalibrasyon ölçeği\n";
-  h += "/setcalgen <x>    -> jeneratör kalibrasyon ölçeği\n";
-  h += "/setgendiv <x>    -> gen akü bölücü oranı\n";
-  h += "/setcamdiv <x>    -> cam akü bölücü oranı\n";
-  h += "\nNot: Aşama 1'de sadece admin ID komut çalıştırır.\n";
+  h += "/auto   -> AUTO mod\n";
+  h += "/manual -> MANUAL mod\n";
+  h += "/save   -> ayarları NVS kaydet\n";
+  h += "/setcalmains <x>\n";
+  h += "/setcalgen <x>\n";
+  h += "/setgendiv <x>\n";
+  h += "/setcamdiv <x>\n";
   return h;
 }
 
@@ -162,8 +173,6 @@ static void handleTelegram() {
   int numNew = bot.getUpdates(bot.last_message_received + 1);
   while (numNew) {
     for (int i = 0; i < numNew; i++) {
-
-      // DİKKAT: bot.messages[i] tipi telegramMessage
       telegramMessage& msg = bot.messages[i];
       if (!isAuthorized(msg)) continue;
 
@@ -186,19 +195,19 @@ static void handleTelegram() {
       } else if (text.startsWith("/setcalmains")) {
         float v = text.substring(String("/setcalmains").length()).toFloat();
         if (v > 0.01f) { g_set.calMains = v; bot.sendMessage(msg.chat_id, "✅ calMains = " + fmt2(v), ""); }
-        else bot.sendMessage(msg.chat_id, "❌ Geçersiz değer.", "");
+        else bot.sendMessage(msg.chat_id, "❌ Geçersiz.", "");
       } else if (text.startsWith("/setcalgen")) {
         float v = text.substring(String("/setcalgen").length()).toFloat();
         if (v > 0.01f) { g_set.calGen = v; bot.sendMessage(msg.chat_id, "✅ calGen = " + fmt2(v), ""); }
-        else bot.sendMessage(msg.chat_id, "❌ Geçersiz değer.", "");
+        else bot.sendMessage(msg.chat_id, "❌ Geçersiz.", "");
       } else if (text.startsWith("/setgendiv")) {
         float v = text.substring(String("/setgendiv").length()).toFloat();
         if (v > 1.0f) { g_set.genBattDiv = v; bot.sendMessage(msg.chat_id, "✅ genDiv = " + fmt2(v), ""); }
-        else bot.sendMessage(msg.chat_id, "❌ Geçersiz değer.", "");
+        else bot.sendMessage(msg.chat_id, "❌ Geçersiz.", "");
       } else if (text.startsWith("/setcamdiv")) {
         float v = text.substring(String("/setcamdiv").length()).toFloat();
         if (v > 1.0f) { g_set.camBattDiv = v; bot.sendMessage(msg.chat_id, "✅ camDiv = " + fmt2(v), ""); }
-        else bot.sendMessage(msg.chat_id, "❌ Geçersiz değer.", "");
+        else bot.sendMessage(msg.chat_id, "❌ Geçersiz.", "");
       } else {
         bot.sendMessage(msg.chat_id, "Komut tanınmadı. /help yaz.", "");
       }
@@ -211,14 +220,21 @@ static void readAllMeasurements() {
   g_meas.wifiRssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
   g_meas.uptimeS  = millis() / 1000;
 
-  g_meas.mainsV = readAcRmsApprox(PIN_ADC_MAINS, g_set.calMains);
-  g_meas.genV   = readAcRmsApprox(PIN_ADC_GEN,   g_set.calGen);
+  // Raw
+  g_meas.mainsV_raw = readAcRmsApprox(PIN_ADC_MAINS, g_set.calMains);
+  g_meas.genV_raw   = readAcRmsApprox(PIN_ADC_GEN,   g_set.calGen);
 
   float vGenAdc = readAdcVoltage(PIN_ADC_GEN_BATT);
   float vCamAdc = readAdcVoltage(PIN_ADC_CAM_BATT);
 
-  g_meas.genBattV = vGenAdc * g_set.genBattDiv;
-  g_meas.camBattV = vCamAdc * g_set.camBattDiv;
+  g_meas.genBattV_raw = vGenAdc * g_set.genBattDiv;
+  g_meas.camBattV_raw = vCamAdc * g_set.camBattDiv;
+
+  // Filtered
+  g_meas.mainsV   = lpf(g_meas.mainsV,   g_meas.mainsV_raw,   LPF_ALPHA_AC);
+  g_meas.genV     = lpf(g_meas.genV,     g_meas.genV_raw,     LPF_ALPHA_AC);
+  g_meas.genBattV = lpf(g_meas.genBattV, g_meas.genBattV_raw, LPF_ALPHA_BATT);
+  g_meas.camBattV = lpf(g_meas.camBattV, g_meas.camBattV_raw, LPF_ALPHA_BATT);
 }
 
 static void handleSaveButton() {
@@ -255,7 +271,6 @@ void setup() {
   loadSettings();
   connectWiFi();
 
-  // Telegram TLS (kolay kurulum)
   tgClient.setInsecure();
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -294,18 +309,19 @@ void loop() {
 
     Serial.print("[");
     Serial.print(PROJECT_VERSION);
-    Serial.print("] Mode=");
-    Serial.print(g_mode == MODE_AUTO ? "AUTO" : "MANUAL");
-
-    Serial.print(" | Mains~=");
+    Serial.print("] Mains~=");
     Serial.print(fmt2(g_meas.mainsV));
-    Serial.print("V Gen~=");
+    Serial.print("V (raw ");
+    Serial.print(fmt2(g_meas.mainsV_raw));
+    Serial.print(")  Gen~=");
     Serial.print(fmt2(g_meas.genV));
-    Serial.print("V GenBatt=");
+    Serial.print("V (raw ");
+    Serial.print(fmt2(g_meas.genV_raw));
+    Serial.print(")  GenBatt=");
     Serial.print(fmt2(g_meas.genBattV));
-    Serial.print("V CamBatt=");
+    Serial.print("V  CamBatt=");
     Serial.print(fmt2(g_meas.camBattV));
-    Serial.print("V RSSI=");
+    Serial.print("V  RSSI=");
     Serial.print(g_meas.wifiRssi);
     Serial.println("dBm");
   }
