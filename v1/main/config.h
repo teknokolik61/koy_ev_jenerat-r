@@ -1,5 +1,5 @@
 // =====================
-// config.h (v9.010)
+// config.h (v10.003)
 // =====================
 #pragma once
 #include <stdint.h>
@@ -9,7 +9,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v9.010"
+#define PROJECT_VERSION "v10.003"
 
 // =====================
 // Cihaz Adı
@@ -33,6 +33,39 @@ inline constexpr bool ENABLE_TG_STATE_ALERTS = true;
 inline constexpr const char* NVS_NAMESPACE = "koygen";
 
 // =====================
+// TFT (ILI9341) - SPI
+// =====================
+inline constexpr int8_t  TFT_CS   = 5;
+inline constexpr int8_t  TFT_DC   = 2;
+inline constexpr int8_t  TFT_RST  = 4;
+
+inline constexpr int8_t  TFT_SCK  = 18;
+inline constexpr int8_t  TFT_MOSI = 23;
+inline constexpr int8_t  TFT_MISO = 19;
+
+inline constexpr int8_t  PIN_TFT_BL = 15; // -1 yaparsan BL kontrol kapalı
+inline constexpr uint8_t TFT_BL_ACTIVE_LEVEL = HIGH;
+
+inline constexpr uint8_t TFT_ROTATION = 1;
+
+// =====================
+// 6 Buton (INPUT_PULLUP)
+// =====================
+inline constexpr uint8_t PIN_BTN_LEFT  = 13;
+inline constexpr uint8_t PIN_BTN_RIGHT = 14;
+inline constexpr uint8_t PIN_BTN_UP    = 16;
+inline constexpr uint8_t PIN_BTN_DOWN  = 17;
+inline constexpr uint8_t PIN_BTN_BACK  = 25;
+inline constexpr uint8_t PIN_BTN_OK    = 26;
+
+inline constexpr uint16_t BTN_DEBOUNCE_MS        = 30;
+inline constexpr uint16_t BTN_REPEAT_START_MS    = 450;
+inline constexpr uint16_t BTN_REPEAT_PERIOD_MS   = 120;
+inline constexpr uint16_t BTN_FAST_STEP_AFTER_MS = 900;
+
+inline constexpr uint16_t UI_STATUS_REFRESH_MS   = 500;
+
+// =====================
 // Pins (ADC)
 // =====================
 inline constexpr uint8_t PIN_ADC_MAINS     = 34;
@@ -40,18 +73,14 @@ inline constexpr uint8_t PIN_ADC_GEN       = 35;
 inline constexpr uint8_t PIN_ADC_GEN_BATT  = 32;
 inline constexpr uint8_t PIN_ADC_CAM_BATT  = 33;
 
-// Save butonu
-inline constexpr uint8_t PIN_BTN_SAVE = 27;
-
 // =====================
-// Stage 9 - Relay Control (LOW aktif)
-// Not: ENABLE_RELAY_CONTROL=0 iken röleler fiziksel çıkış vermez.
+// Relay Control (LOW aktif)
 // =====================
 #define ENABLE_RELAY_CONTROL 0
 
-inline constexpr uint8_t PIN_RELAY_FUEL  = 23;
-inline constexpr uint8_t PIN_RELAY_START = 25;
-inline constexpr uint8_t PIN_RELAY_STOP  = 26;
+inline constexpr uint8_t PIN_RELAY_FUEL  = 21;
+inline constexpr uint8_t PIN_RELAY_START = 22;
+inline constexpr uint8_t PIN_RELAY_STOP  = 27;
 
 inline constexpr uint8_t RELAY_ACTIVE_LEVEL = LOW;
 inline constexpr uint8_t RELAY_IDLE_LEVEL   = HIGH;
@@ -64,20 +93,15 @@ inline constexpr uint16_t RELAY_SAFE_GAP_MS = 80;
 inline constexpr uint16_t ADC_MAX  = 4095;
 inline constexpr float    ADC_VREF = 3.3f;
 
-// Divider oranları (örnek 120k / 33k)
 inline constexpr float GEN_BATT_DIV_RATIO = 4.63636f;
 inline constexpr float CAM_BATT_DIV_RATIO = 4.63636f;
 
-// AC sensör kalibrasyonları (ZMPT101B vb.)
 inline constexpr float CAL_MAINS = 240.0f;
 inline constexpr float CAL_GEN   = 240.0f;
 
 inline constexpr uint32_t MEASURE_MS       = 1000;
 inline constexpr uint32_t SERIAL_REPORT_MS = 2000;
 
-// =====================
-// Filters
-// =====================
 inline constexpr float LPF_ALPHA_AC   = 0.15f;
 inline constexpr float LPF_ALPHA_BATT = 0.20f;
 
@@ -116,23 +140,20 @@ inline constexpr float HYST_V_AC   = 5.0f;
 inline constexpr float HYST_V_BATT = 0.15f;
 
 // =====================
-// Stage 5 - Çalışma Saat Sayacı
+// Stage 5
 // =====================
 inline constexpr float    GEN_RUNNING_V          = 160.0f;
 inline constexpr uint16_t GEN_RUNNING_CONFIRM_S = 10;
 inline constexpr uint32_t HOURS_SAVE_PERIOD_S   = 60;
 
 // =====================
-// Stage 9 - AUTO defaults
+// Stage 9
 // =====================
 inline constexpr float    AUTO_START_MAINS_V      = 160.0f;
 inline constexpr uint16_t MAINS_FAIL_CONFIRM_S    = 15;
 inline constexpr uint16_t MAINS_RETURN_CONFIRM_S  = 20;
 inline constexpr uint16_t COOLDOWN_S              = 120;
 
-// =====================
-// Stage 9 - Start/Stop timing defaults
-// =====================
 inline constexpr uint16_t FUEL_PRIME_MS        = 1500;
 inline constexpr uint16_t START_PULSE_MS       = 1200;
 inline constexpr uint32_t START_RETRY_GAP_MS   = 3500;
@@ -144,14 +165,8 @@ inline constexpr uint16_t STOP_VERIFY_S        = 8;
 inline constexpr uint8_t  STOP_MAX_ATTEMPTS    = 2;
 inline constexpr uint16_t FUEL_OFF_DELAY_MS    = 600;
 
-// =====================
-// Auto start güvenliği
-// =====================
 inline constexpr bool AUTO_BLOCK_ON_BATT_CRIT = true;
 
-// =====================
-// FAULT exponential backoff retry
-// =====================
-inline constexpr uint8_t  FAULT_MAX_RETRIES   = 3;     // 3 deneme: 3dk -> 6dk -> 12dk
-inline constexpr uint16_t FAULT_RETRY_BASE_S  = 180;   // 3 dk
-inline constexpr uint16_t FAULT_RETRY_MAX_S   = 1800;  // 30 dk cap
+inline constexpr uint8_t  FAULT_MAX_RETRIES   = 3;
+inline constexpr uint16_t FAULT_RETRY_BASE_S  = 180;
+inline constexpr uint16_t FAULT_RETRY_MAX_S   = 1800;
