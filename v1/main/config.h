@@ -4,7 +4,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v5.005"
+#define PROJECT_VERSION "v8.001"
 
 // =====================
 // Cihaz Adı
@@ -34,6 +34,9 @@ inline constexpr const char* CHAT_ID   = "-1003432924253"; // grup chat id
 inline constexpr long MASTER_ADMIN_ID = 1253195249; // kendi telegram user id
 
 inline constexpr uint32_t TG_POLL_MS = 1200;
+
+// Telegram state bildirimlerini aç/kapat
+inline constexpr bool ENABLE_TG_STATE_ALERTS = true;
 
 // =====================
 // Preferences (NVS)

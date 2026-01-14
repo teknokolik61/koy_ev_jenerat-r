@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v5.005
+// SÜRÜM v8.001
 // =====================
 
 #include <Arduino.h>
@@ -51,12 +51,24 @@ static bool lastBtn = true;
 static uint32_t btnDownMs = 0;
 
 // ---------------------
-// Battery State
+// Battery State (NO TELEGRAM for battery)
 // ---------------------
 enum class BattState : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
 
 static BattState g_genBattState = BattState::UNKNOWN;
 static BattState g_camBattState = BattState::UNKNOWN;
+
+// ---------------------
+// Stage 8 - MAINS / GEN state + Telegram alerts
+// ---------------------
+enum class MainsState : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
+enum class GenState   : uint8_t { UNKNOWN, OFF,      LOW_V, NORMAL, HIGH_V };
+
+static MainsState g_mainsState = MainsState::UNKNOWN;
+static GenState   g_genState   = GenState::UNKNOWN;
+
+// Boot sonrası ilk ölçümlerde ekstra mesaj atmasın diye
+static bool g_stateAlertsArmed = false;
 
 // ---------------------
 // Stage 5 - Hours Counter
@@ -140,7 +152,7 @@ static void loadSettings() {
 
   g_mode = (RunMode)prefs.getUChar("mode", (uint8_t)MODE_MANUAL);
 
-  // total hours load (64-bit safe as two uint32)
+  // total hours load (64-bit safe: two uint32)
   uint32_t lo = prefs.getUInt("hrsLo", 0);
   uint32_t hi = prefs.getUInt("hrsHi", 0);
   g_genRunTotalS = ((uint64_t)hi << 32) | (uint64_t)lo;
@@ -224,7 +236,7 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
 }
 
 // =====================
-// Battery State (NO TELEGRAM NOTIFY HERE)
+// Battery State (only compute)
 // =====================
 static String battStateToText(BattState st) {
   switch (st) {
@@ -268,9 +280,108 @@ static BattState evalBatt(float v, BattState prev) {
 }
 
 static void updateBatteryStatesOnly() {
-  // Sadece state hesapla (mesaj yok)
   g_genBattState = evalBatt(g_meas.genBattV, g_genBattState);
   g_camBattState = evalBatt(g_meas.camBattV, g_camBattState);
+}
+
+// =====================
+// Stage 8 - MAINS / GEN state eval + Telegram
+// =====================
+static String mainsStateLine(MainsState st, float v) {
+  switch (st) {
+    case MainsState::CRITICAL: return "🚨 Şebeke KRİTİK: " + fmt2(v) + "V";
+    case MainsState::LOW_V:    return "⚠️ Şebeke DÜŞÜK: " + fmt2(v) + "V";
+    case MainsState::HIGH_V:   return "⚠️ Şebeke YÜKSEK: " + fmt2(v) + "V";
+    case MainsState::NORMAL:   return "✅ Şebeke NORMAL: " + fmt2(v) + "V";
+    default:                   return "ℹ️ Şebeke: " + fmt2(v) + "V";
+  }
+}
+
+static String genStateLine(GenState st, float v) {
+  switch (st) {
+    case GenState::OFF:     return "⛔ Jeneratör OFF: " + fmt2(v) + "V";
+    case GenState::LOW_V:   return "⚠️ Jeneratör DÜŞÜK: " + fmt2(v) + "V";
+    case GenState::HIGH_V:  return "⚠️ Jeneratör YÜKSEK: " + fmt2(v) + "V";
+    case GenState::NORMAL:  return "✅ Jeneratör NORMAL: " + fmt2(v) + "V";
+    default:                return "ℹ️ Jeneratör: " + fmt2(v) + "V";
+  }
+}
+
+static MainsState evalMains(float v, MainsState prev) {
+  float h = g_set.hystAc;
+
+  switch (prev) {
+    case MainsState::CRITICAL:
+      if (v >= g_set.mainsCrit + h) return MainsState::LOW_V;
+      return MainsState::CRITICAL;
+
+    case MainsState::LOW_V:
+      if (v < g_set.mainsCrit) return MainsState::CRITICAL;
+      if (v >= g_set.mainsLow + h) return MainsState::NORMAL;
+      return MainsState::LOW_V;
+
+    case MainsState::NORMAL:
+      if (v >= g_set.mainsHigh) return MainsState::HIGH_V;
+      if (v <  g_set.mainsLow)  return MainsState::LOW_V;
+      return MainsState::NORMAL;
+
+    case MainsState::HIGH_V:
+      if (v <= g_set.mainsHigh - h) return MainsState::NORMAL;
+      return MainsState::HIGH_V;
+
+    default:
+      if (v < g_set.mainsCrit) return MainsState::CRITICAL;
+      if (v < g_set.mainsLow)  return MainsState::LOW_V;
+      if (v >= g_set.mainsHigh) return MainsState::HIGH_V;
+      return MainsState::NORMAL;
+  }
+}
+
+static GenState evalGen(float v, GenState prev) {
+  float h = g_set.hystAc;
+
+  switch (prev) {
+    case GenState::OFF:
+      if (v >= g_set.genOff + h) return GenState::LOW_V;
+      return GenState::OFF;
+
+    case GenState::LOW_V:
+      if (v < g_set.genOff) return GenState::OFF;
+      if (v >= g_set.genNormMin + h) return GenState::NORMAL;
+      return GenState::LOW_V;
+
+    case GenState::NORMAL:
+      if (v > g_set.genNormMax) return GenState::HIGH_V;
+      if (v < g_set.genLow)     return GenState::LOW_V;
+      return GenState::NORMAL;
+
+    case GenState::HIGH_V:
+      if (v <= g_set.genNormMax - h) return GenState::NORMAL;
+      return GenState::HIGH_V;
+
+    default:
+      if (v < g_set.genOff) return GenState::OFF;
+      if (v < g_set.genLow) return GenState::LOW_V;
+      if (v > g_set.genNormMax) return GenState::HIGH_V;
+      return GenState::NORMAL;
+  }
+}
+
+static void handleStateAlerts() {
+  if (!ENABLE_TG_STATE_ALERTS) return;
+  if (!g_stateAlertsArmed) return;
+
+  MainsState nm = evalMains(g_meas.mainsV, g_mainsState);
+  if (nm != g_mainsState) {
+    g_mainsState = nm;
+    notify(mainsStateLine(g_mainsState, g_meas.mainsV));
+  }
+
+  GenState ng = evalGen(g_meas.genV, g_genState);
+  if (ng != g_genState) {
+    g_genState = ng;
+    notify(genStateLine(g_genState, g_meas.genV));
+  }
 }
 
 // =====================
@@ -308,26 +419,12 @@ static void updateGenHoursCounter() {
 // =====================
 // Boot Report
 // =====================
-static String mainsBootLine(float v) {
-  if (v < g_set.mainsCrit) return "🚨 Şebeke KRİTİK: " + fmt2(v) + "V";
-  if (v < g_set.mainsLow)  return "⚠️ Şebeke DÜŞÜK: " + fmt2(v) + "V";
-  if (v > g_set.mainsHigh) return "⚠️ Şebeke YÜKSEK: " + fmt2(v) + "V";
-  return "✅ Şebeke NORMAL: " + fmt2(v) + "V";
-}
-
-static String genBootLine(float v) {
-  if (v < g_set.genOff)      return "⛔ Jeneratör OFF: " + fmt2(v) + "V";
-  if (v < g_set.genLow)      return "⚠️ Jeneratör DÜŞÜK: " + fmt2(v) + "V";
-  if (v > g_set.genNormMax)  return "⚠️ Jeneratör YÜKSEK: " + fmt2(v) + "V";
-  return "✅ Jeneratör NORMAL: " + fmt2(v) + "V";
-}
-
 static String buildBootReport() {
   String s;
   s += String(DEVICE_NAME) + "\n";
   s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
-  s += mainsBootLine(g_meas.mainsV) + "\n";
-  s += genBootLine(g_meas.genV) + "\n";
+  s += mainsStateLine(g_mainsState, g_meas.mainsV) + "\n";
+  s += genStateLine(g_genState, g_meas.genV) + "\n";
   s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + "V (" + battStateToText(g_genBattState) + ")\n";
   s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + "V (" + battStateToText(g_camBattState) + ")\n";
   s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
@@ -335,7 +432,7 @@ static String buildBootReport() {
 }
 
 // =====================
-// Telegram
+// Telegram commands
 // =====================
 static bool isAuthorized(const telegramMessage& msg) {
   long fromId = msg.from_id.toInt();
@@ -345,11 +442,11 @@ static bool isAuthorized(const telegramMessage& msg) {
 static String buildStatusText() {
   String s;
   s += String(DEVICE_NAME) + "\n";
-  s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
-  s += "🔌 Şebeke: " + fmt2(g_meas.mainsV) + " V\n";
-  s += "🟠 Jeneratör: " + fmt2(g_meas.genV) + " V\n";
+  s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n\n";
+  s += "🔌 Şebeke: " + fmt2(g_meas.mainsV) + " V (" + String((int)g_mainsState) + ")\n";
+  s += "🟠 Jeneratör: " + fmt2(g_meas.genV) + " V (" + String((int)g_genState) + ")\n";
   s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + " V (" + battStateToText(g_genBattState) + ")\n";
-  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V (" + battStateToText(g_camBattState) + ")\n";
+  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V (" + battStateToText(g_camBattState) + ")\n\n";
   s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
   s += String("▶️ Running: ") + (g_genRunning ? "YES" : "NO") + "\n";
   return s;
@@ -441,17 +538,22 @@ void setup() {
   connectWiFi();
   tgClient.setInsecure();
 
-  // İlk ölçüm 0.00V olmasın diye iki kez ölç
+  // İlk ölçüm 0.00V olmasın diye 2 kez ölç
   readAllMeasurements();
   delay(250);
   readAllMeasurements();
 
-  // Akü state'lerini hesapla (mesaj atma yok)
+  // İlk state'leri belirle (boot rapor doğru olsun)
   updateBatteryStatesOnly();
+  g_mainsState = evalMains(g_meas.mainsV, MainsState::UNKNOWN);
+  g_genState   = evalGen(g_meas.genV,   GenState::UNKNOWN);
 
   if (WiFi.status() == WL_CONNECTED) {
     notify(buildBootReport());
   }
+
+  // Boot sonrası ilk döngüden itibaren state alertleri aç
+  g_stateAlertsArmed = true;
 
   tMeasure = millis();
   tSerial  = millis();
@@ -477,8 +579,11 @@ void loop() {
 
     readAllMeasurements();
 
-    // ✅ sadece state güncelle (Telegram yok)
+    // aküler: sadece state güncelle (mesaj yok)
     updateBatteryStatesOnly();
+
+    // stage 8: şebeke/jeneratör state mesajları
+    handleStateAlerts();
 
     // çalışma saati
     updateGenHoursCounter();
