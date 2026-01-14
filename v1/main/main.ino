@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v8.001
+// SÜRÜM v8.002
 // =====================
 
 #include <Arduino.h>
@@ -54,7 +54,6 @@ static uint32_t btnDownMs = 0;
 // Battery State (NO TELEGRAM for battery)
 // ---------------------
 enum class BattState : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
-
 static BattState g_genBattState = BattState::UNKNOWN;
 static BattState g_camBattState = BattState::UNKNOWN;
 
@@ -67,7 +66,6 @@ enum class GenState   : uint8_t { UNKNOWN, OFF,      LOW_V, NORMAL, HIGH_V };
 static MainsState g_mainsState = MainsState::UNKNOWN;
 static GenState   g_genState   = GenState::UNKNOWN;
 
-// Boot sonrası ilk ölçümlerde ekstra mesaj atmasın diye
 static bool g_stateAlertsArmed = false;
 
 // ---------------------
@@ -115,6 +113,22 @@ static void connectWiFi() {
   }
 }
 
+// Komut normalize:
+// "/durum@botadi arg" -> "/durum"
+static String normalizeCommand(const String& textRaw) {
+  String t = textRaw;
+  t.trim();
+
+  int sp = t.indexOf(' ');
+  if (sp >= 0) t = t.substring(0, sp);
+
+  int at = t.indexOf('@');
+  if (at >= 0) t = t.substring(0, at);
+
+  t.toLowerCase();
+  return t;
+}
+
 // =====================
 // NVS
 // =====================
@@ -145,14 +159,12 @@ static void loadSettings() {
   g_set.hystAc       = prefs.getFloat("hAc",  HYST_V_AC);
   g_set.hystBatt     = prefs.getFloat("hBt",  HYST_V_BATT);
 
-  // Stage 5
   g_set.genRunningV      = prefs.getFloat("gRunV", GEN_RUNNING_V);
   g_set.genRunConfirmS   = prefs.getUShort("gRunC", GEN_RUNNING_CONFIRM_S);
   g_set.hoursSavePeriodS = prefs.getUInt("hSaveP", HOURS_SAVE_PERIOD_S);
 
   g_mode = (RunMode)prefs.getUChar("mode", (uint8_t)MODE_MANUAL);
 
-  // total hours load (64-bit safe: two uint32)
   uint32_t lo = prefs.getUInt("hrsLo", 0);
   uint32_t hi = prefs.getUInt("hrsHi", 0);
   g_genRunTotalS = ((uint64_t)hi << 32) | (uint64_t)lo;
@@ -435,6 +447,10 @@ static String buildBootReport() {
 // Telegram commands
 // =====================
 static bool isAuthorized(const telegramMessage& msg) {
+  // 1) Doğru gruptan geliyorsa izin ver
+  if (msg.chat_id == String(CHAT_ID)) return true;
+
+  // 2) Ya da admin id eşleşiyorsa izin ver
   long fromId = msg.from_id.toInt();
   return (fromId == MASTER_ADMIN_ID);
 }
@@ -443,8 +459,8 @@ static String buildStatusText() {
   String s;
   s += String(DEVICE_NAME) + "\n";
   s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n\n";
-  s += "🔌 Şebeke: " + fmt2(g_meas.mainsV) + " V (" + String((int)g_mainsState) + ")\n";
-  s += "🟠 Jeneratör: " + fmt2(g_meas.genV) + " V (" + String((int)g_genState) + ")\n";
+  s += "🔌 Şebeke: " + fmt2(g_meas.mainsV) + " V\n";
+  s += "🟠 Jeneratör: " + fmt2(g_meas.genV) + " V\n";
   s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + " V (" + battStateToText(g_genBattState) + ")\n";
   s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V (" + battStateToText(g_camBattState) + ")\n\n";
   s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
@@ -459,23 +475,25 @@ static void handleTelegram() {
   while (numNew > 0) {
     for (int i = 0; i < numNew; i++) {
       telegramMessage& msg = bot.messages[i];
+
       if (!isAuthorized(msg)) continue;
 
-      String text = msg.text;
-      text.trim();
+      String cmd = normalizeCommand(msg.text);
 
-      if (text == "/durum" || text == "/status") {
+      if (cmd == "/durum" || cmd == "/status") {
         bot.sendMessage(msg.chat_id, buildStatusText(), "");
-      } else if (text == "/save") {
+      } else if (cmd == "/save") {
         saveSettings();
         saveHoursTotal();
         bot.sendMessage(msg.chat_id, "✅ Ayarlar + sayaç NVS'ye kaydedildi.", "");
-      } else if (text == "/reset_hours") {
+      } else if (cmd == "/reset_hours") {
         g_genRunTotalS = 0;
         saveHoursTotal();
         bot.sendMessage(msg.chat_id, "✅ Çalışma saati sıfırlandı.", "");
+      } else if (cmd == "/ping") {
+        bot.sendMessage(msg.chat_id, "pong ✅", "");
       } else {
-        bot.sendMessage(msg.chat_id, "Komut: /durum /save /reset_hours", "");
+        bot.sendMessage(msg.chat_id, "Komut: /durum /save /reset_hours /ping", "");
       }
     }
 
@@ -550,9 +568,10 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     notify(buildBootReport());
+    // test amaçlı: botun komut aldığını görmek için
+    notify("ℹ️ Bot hazır. Test: /ping");
   }
 
-  // Boot sonrası ilk döngüden itibaren state alertleri aç
   g_stateAlertsArmed = true;
 
   tMeasure = millis();
@@ -591,7 +610,7 @@ void loop() {
 
   if (now - tSerial >= SERIAL_REPORT_MS) {
     tSerial = now;
-    Serial.print("["); Serial.print(PROJECT_VERSION); Serial.print("] ");
+    Serial.print("[v8.002] ");
     Serial.print("Mains="); Serial.print(fmt2(g_meas.mainsV));
     Serial.print(" Gen="); Serial.print(fmt2(g_meas.genV));
     Serial.print(" GenBatt="); Serial.print(fmt2(g_meas.genBattV));
