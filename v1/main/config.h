@@ -4,7 +4,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v3.003"
+#define PROJECT_VERSION "v4.001"
 
 // =====================
 // Serial
@@ -51,6 +51,7 @@ inline constexpr uint8_t PIN_BTN_SAVE = 27;
 inline constexpr uint16_t ADC_MAX  = 4095;
 inline constexpr float    ADC_VREF = 3.3f;
 
+// Divider oranları (örnek 120k / 33k)
 inline constexpr float GEN_BATT_DIV_RATIO = 4.63636f;
 inline constexpr float CAM_BATT_DIV_RATIO = 4.63636f;
 
@@ -70,7 +71,7 @@ inline constexpr uint16_t AC_SAMPLES  = 800;
 inline constexpr uint16_t AC_US_DELAY = 200;
 
 // =====================
-// Aşama 3: Thresholds
+// Thresholds - MAINS/GEN (Aşama 3)
 // =====================
 inline constexpr float MAINS_HIGH_V     = 245.0f;
 inline constexpr float MAINS_NORMAL_MIN = 210.0f;
@@ -83,5 +84,15 @@ inline constexpr float GEN_LOW_V        = 190.0f;
 inline constexpr float GEN_NORMAL_MIN   = 210.0f;
 inline constexpr float GEN_NORMAL_MAX   = 240.0f;
 
-// Histerezis (geri dönüş bandı)
-inline constexpr float HYST_V = 5.0f;
+// =====================
+// Thresholds - BATTERY (Aşama 4)
+// =====================
+// 12V kurşun-asit için makul başlangıç değerleri (NVS ile değişebilir)
+inline constexpr float BATT_HIGH_V     = 13.2f;
+inline constexpr float BATT_NORMAL_MIN = 12.2f;
+inline constexpr float BATT_LOW_V      = 11.8f;
+inline constexpr float BATT_CRIT_V     = 11.2f;
+
+// Histerezis
+inline constexpr float HYST_V_AC   = 5.0f;
+inline constexpr float HYST_V_BATT = 0.15f;
