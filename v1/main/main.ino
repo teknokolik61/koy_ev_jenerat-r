@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v8.002
+// SÜRÜM v8.003
 // =====================
 
 #include <Arduino.h>
@@ -33,7 +33,6 @@ struct Settings {
   float hystAc;
   float hystBatt;
 
-  // Stage 5
   float genRunningV;
   uint16_t genRunConfirmS;
   uint32_t hoursSavePeriodS;
@@ -47,18 +46,16 @@ struct Measurements {
 } g_meas;
 
 static uint32_t tMeasure = 0, tSerial = 0, tTgPoll = 0;
-static bool lastBtn = true;
-static uint32_t btnDownMs = 0;
 
 // ---------------------
-// Battery State (NO TELEGRAM for battery)
+// Battery State (no telegram spam)
 // ---------------------
 enum class BattState : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
 static BattState g_genBattState = BattState::UNKNOWN;
 static BattState g_camBattState = BattState::UNKNOWN;
 
 // ---------------------
-// Stage 8 - MAINS / GEN state + Telegram alerts
+// MAINS / GEN state alerts
 // ---------------------
 enum class MainsState : uint8_t { UNKNOWN, CRITICAL, LOW_V, NORMAL, HIGH_V };
 enum class GenState   : uint8_t { UNKNOWN, OFF,      LOW_V, NORMAL, HIGH_V };
@@ -69,7 +66,7 @@ static GenState   g_genState   = GenState::UNKNOWN;
 static bool g_stateAlertsArmed = false;
 
 // ---------------------
-// Stage 5 - Hours Counter
+// Hours Counter
 // ---------------------
 static bool     g_genRunning = false;
 static uint16_t g_genRunStreakS = 0;
@@ -98,23 +95,7 @@ static float lpf(float prev, float x, float a) {
   return prev + a * (x - prev);
 }
 
-static void notify(const String& msg) {
-  if (WiFi.status() == WL_CONNECTED) bot.sendMessage(CHAT_ID, msg, "");
-}
-
-static void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(250);
-    yield();
-  }
-}
-
-// Komut normalize:
-// "/durum@botadi arg" -> "/durum"
+// Komut normalize: "/durum@bot arg" -> "/durum"
 static String normalizeCommand(const String& textRaw) {
   String t = textRaw;
   t.trim();
@@ -127,6 +108,52 @@ static String normalizeCommand(const String& textRaw) {
 
   t.toLowerCase();
   return t;
+}
+
+static bool tgSendTo(const String& chatId, const String& msg) {
+  bool ok = false;
+  if (WiFi.status() == WL_CONNECTED) {
+    ok = bot.sendMessage(chatId, msg, "");
+  }
+  Serial.print("[TG] send to "); Serial.print(chatId);
+  Serial.print(" => "); Serial.println(ok ? "OK" : "FAIL");
+  return ok;
+}
+
+static void tgSendBootBoth(const String& msg) {
+  // 1) Grup CHAT_ID
+  tgSendTo(String(CHAT_ID), msg);
+
+  // 2) Admin'a özel mesaj denemesi (çoğu zaman user chat_id = user id)
+  String adminChat = String(MASTER_ADMIN_ID);
+  if (adminChat != String(CHAT_ID)) {
+    tgSendTo(adminChat, msg);
+  }
+}
+
+// =====================
+// WiFi
+// =====================
+static void connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  Serial.print("[WiFi] Connecting to "); Serial.println(WIFI_SSID);
+
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+    delay(250);
+    Serial.print(".");
+    yield();
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("[WiFi] OK IP="); Serial.println(WiFi.localIP());
+    Serial.print("[WiFi] RSSI="); Serial.println(WiFi.RSSI());
+  } else {
+    Serial.println("[WiFi] FAIL (no connection)");
+  }
 }
 
 // =====================
@@ -168,38 +195,6 @@ static void loadSettings() {
   uint32_t lo = prefs.getUInt("hrsLo", 0);
   uint32_t hi = prefs.getUInt("hrsHi", 0);
   g_genRunTotalS = ((uint64_t)hi << 32) | (uint64_t)lo;
-}
-
-static void saveSettings() {
-  prefs.putFloat("calMains", g_set.calMains);
-  prefs.putFloat("calGen",   g_set.calGen);
-  prefs.putFloat("genDiv",   g_set.genBattDiv);
-  prefs.putFloat("camDiv",   g_set.camBattDiv);
-
-  prefs.putFloat("mHi",  g_set.mainsHigh);
-  prefs.putFloat("mNmn", g_set.mainsNormMin);
-  prefs.putFloat("mNmx", g_set.mainsNormMax);
-  prefs.putFloat("mLo",  g_set.mainsLow);
-  prefs.putFloat("mCr",  g_set.mainsCrit);
-
-  prefs.putFloat("gOff", g_set.genOff);
-  prefs.putFloat("gLo",  g_set.genLow);
-  prefs.putFloat("gNmn", g_set.genNormMin);
-  prefs.putFloat("gNmx", g_set.genNormMax);
-
-  prefs.putFloat("bHi",  g_set.battHigh);
-  prefs.putFloat("bNmn", g_set.battNormMin);
-  prefs.putFloat("bLo",  g_set.battLow);
-  prefs.putFloat("bCr",  g_set.battCrit);
-
-  prefs.putFloat("hAc",  g_set.hystAc);
-  prefs.putFloat("hBt",  g_set.hystBatt);
-
-  prefs.putFloat("gRunV", g_set.genRunningV);
-  prefs.putUShort("gRunC", g_set.genRunConfirmS);
-  prefs.putUInt("hSaveP", g_set.hoursSavePeriodS);
-
-  prefs.putUChar("mode", (uint8_t)g_mode);
 }
 
 static void saveHoursTotal() {
@@ -248,7 +243,7 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
 }
 
 // =====================
-// Battery State (only compute)
+// Battery state
 // =====================
 static String battStateToText(BattState st) {
   switch (st) {
@@ -297,9 +292,9 @@ static void updateBatteryStatesOnly() {
 }
 
 // =====================
-// Stage 8 - MAINS / GEN state eval + Telegram
+// MAINS/GEN state + alerts
 // =====================
-static String mainsStateLine(MainsState st, float v) {
+static String mainsLine(MainsState st, float v) {
   switch (st) {
     case MainsState::CRITICAL: return "🚨 Şebeke KRİTİK: " + fmt2(v) + "V";
     case MainsState::LOW_V:    return "⚠️ Şebeke DÜŞÜK: " + fmt2(v) + "V";
@@ -309,7 +304,7 @@ static String mainsStateLine(MainsState st, float v) {
   }
 }
 
-static String genStateLine(GenState st, float v) {
+static String genLine(GenState st, float v) {
   switch (st) {
     case GenState::OFF:     return "⛔ Jeneratör OFF: " + fmt2(v) + "V";
     case GenState::LOW_V:   return "⚠️ Jeneratör DÜŞÜK: " + fmt2(v) + "V";
@@ -321,26 +316,17 @@ static String genStateLine(GenState st, float v) {
 
 static MainsState evalMains(float v, MainsState prev) {
   float h = g_set.hystAc;
-
   switch (prev) {
-    case MainsState::CRITICAL:
-      if (v >= g_set.mainsCrit + h) return MainsState::LOW_V;
-      return MainsState::CRITICAL;
-
+    case MainsState::CRITICAL: if (v >= g_set.mainsCrit + h) return MainsState::LOW_V; return MainsState::CRITICAL;
     case MainsState::LOW_V:
       if (v < g_set.mainsCrit) return MainsState::CRITICAL;
       if (v >= g_set.mainsLow + h) return MainsState::NORMAL;
       return MainsState::LOW_V;
-
     case MainsState::NORMAL:
       if (v >= g_set.mainsHigh) return MainsState::HIGH_V;
       if (v <  g_set.mainsLow)  return MainsState::LOW_V;
       return MainsState::NORMAL;
-
-    case MainsState::HIGH_V:
-      if (v <= g_set.mainsHigh - h) return MainsState::NORMAL;
-      return MainsState::HIGH_V;
-
+    case MainsState::HIGH_V: if (v <= g_set.mainsHigh - h) return MainsState::NORMAL; return MainsState::HIGH_V;
     default:
       if (v < g_set.mainsCrit) return MainsState::CRITICAL;
       if (v < g_set.mainsLow)  return MainsState::LOW_V;
@@ -351,26 +337,17 @@ static MainsState evalMains(float v, MainsState prev) {
 
 static GenState evalGen(float v, GenState prev) {
   float h = g_set.hystAc;
-
   switch (prev) {
-    case GenState::OFF:
-      if (v >= g_set.genOff + h) return GenState::LOW_V;
-      return GenState::OFF;
-
+    case GenState::OFF: if (v >= g_set.genOff + h) return GenState::LOW_V; return GenState::OFF;
     case GenState::LOW_V:
       if (v < g_set.genOff) return GenState::OFF;
       if (v >= g_set.genNormMin + h) return GenState::NORMAL;
       return GenState::LOW_V;
-
     case GenState::NORMAL:
       if (v > g_set.genNormMax) return GenState::HIGH_V;
       if (v < g_set.genLow)     return GenState::LOW_V;
       return GenState::NORMAL;
-
-    case GenState::HIGH_V:
-      if (v <= g_set.genNormMax - h) return GenState::NORMAL;
-      return GenState::HIGH_V;
-
+    case GenState::HIGH_V: if (v <= g_set.genNormMax - h) return GenState::NORMAL; return GenState::HIGH_V;
     default:
       if (v < g_set.genOff) return GenState::OFF;
       if (v < g_set.genLow) return GenState::LOW_V;
@@ -386,18 +363,18 @@ static void handleStateAlerts() {
   MainsState nm = evalMains(g_meas.mainsV, g_mainsState);
   if (nm != g_mainsState) {
     g_mainsState = nm;
-    notify(mainsStateLine(g_mainsState, g_meas.mainsV));
+    tgSendTo(String(CHAT_ID), mainsLine(g_mainsState, g_meas.mainsV));
   }
 
   GenState ng = evalGen(g_meas.genV, g_genState);
   if (ng != g_genState) {
     g_genState = ng;
-    notify(genStateLine(g_genState, g_meas.genV));
+    tgSendTo(String(CHAT_ID), genLine(g_genState, g_meas.genV));
   }
 }
 
 // =====================
-// Stage 5 - Hours Counter
+// Hours Counter
 // =====================
 static void updateGenHoursCounter() {
   bool above = (g_meas.genV >= g_set.genRunningV);
@@ -411,14 +388,14 @@ static void updateGenHoursCounter() {
 
   if (!g_genRunning && g_genRunStreakS >= g_set.genRunConfirmS) {
     g_genRunning = true;
-    notify("▶️ Jeneratör ÇALIŞIYOR (sayaç başladı)");
+    tgSendTo(String(CHAT_ID), "▶️ Jeneratör ÇALIŞIYOR (sayaç başladı)");
   }
 
   if (g_genRunning) {
     g_genRunTotalS += 1;
     if (!above) {
       g_genRunning = false;
-      notify("⏹️ Jeneratör DURDU (sayaç durdu)");
+      tgSendTo(String(CHAT_ID), "⏹️ Jeneratör DURDU (sayaç durdu)");
     }
   }
 
@@ -429,81 +406,7 @@ static void updateGenHoursCounter() {
 }
 
 // =====================
-// Boot Report
-// =====================
-static String buildBootReport() {
-  String s;
-  s += String(DEVICE_NAME) + "\n";
-  s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
-  s += mainsStateLine(g_mainsState, g_meas.mainsV) + "\n";
-  s += genStateLine(g_genState, g_meas.genV) + "\n";
-  s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + "V (" + battStateToText(g_genBattState) + ")\n";
-  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + "V (" + battStateToText(g_camBattState) + ")\n";
-  s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
-  return s;
-}
-
-// =====================
-// Telegram commands
-// =====================
-static bool isAuthorized(const telegramMessage& msg) {
-  // 1) Doğru gruptan geliyorsa izin ver
-  if (msg.chat_id == String(CHAT_ID)) return true;
-
-  // 2) Ya da admin id eşleşiyorsa izin ver
-  long fromId = msg.from_id.toInt();
-  return (fromId == MASTER_ADMIN_ID);
-}
-
-static String buildStatusText() {
-  String s;
-  s += String(DEVICE_NAME) + "\n";
-  s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n\n";
-  s += "🔌 Şebeke: " + fmt2(g_meas.mainsV) + " V\n";
-  s += "🟠 Jeneratör: " + fmt2(g_meas.genV) + " V\n";
-  s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + " V (" + battStateToText(g_genBattState) + ")\n";
-  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V (" + battStateToText(g_camBattState) + ")\n\n";
-  s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
-  s += String("▶️ Running: ") + (g_genRunning ? "YES" : "NO") + "\n";
-  return s;
-}
-
-static void handleTelegram() {
-  int numNew = bot.getUpdates(bot.last_message_received + 1);
-  if (numNew <= 0) return;
-
-  while (numNew > 0) {
-    for (int i = 0; i < numNew; i++) {
-      telegramMessage& msg = bot.messages[i];
-
-      if (!isAuthorized(msg)) continue;
-
-      String cmd = normalizeCommand(msg.text);
-
-      if (cmd == "/durum" || cmd == "/status") {
-        bot.sendMessage(msg.chat_id, buildStatusText(), "");
-      } else if (cmd == "/save") {
-        saveSettings();
-        saveHoursTotal();
-        bot.sendMessage(msg.chat_id, "✅ Ayarlar + sayaç NVS'ye kaydedildi.", "");
-      } else if (cmd == "/reset_hours") {
-        g_genRunTotalS = 0;
-        saveHoursTotal();
-        bot.sendMessage(msg.chat_id, "✅ Çalışma saati sıfırlandı.", "");
-      } else if (cmd == "/ping") {
-        bot.sendMessage(msg.chat_id, "pong ✅", "");
-      } else {
-        bot.sendMessage(msg.chat_id, "Komut: /durum /save /reset_hours /ping", "");
-      }
-    }
-
-    numNew = bot.getUpdates(bot.last_message_received + 1);
-    if (numNew <= 0) break;
-  }
-}
-
-// =====================
-// Measure (MAINS + GEN + BATT)
+// Measure
 // =====================
 static void readAllMeasurements() {
   g_meas.wifiRssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
@@ -526,50 +429,95 @@ static void readAllMeasurements() {
 }
 
 // =====================
-// Save Button
+// Boot report + /durum
 // =====================
-static void handleSaveButton() {
-  bool btn = digitalRead(PIN_BTN_SAVE);
-  uint32_t now = millis();
+static String buildBootReport() {
+  String s;
+  s += String(DEVICE_NAME) + "\n";
+  s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
+  s += mainsLine(g_mainsState, g_meas.mainsV) + "\n";
+  s += genLine(g_genState, g_meas.genV) + "\n";
+  s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + "V (" + battStateToText(g_genBattState) + ")\n";
+  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + "V (" + battStateToText(g_camBattState) + ")\n";
+  s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
+  return s;
+}
 
-  if (lastBtn == true && btn == false) btnDownMs = now;
+static String buildStatusText() {
+  return buildBootReport();
+}
 
-  if (lastBtn == false && btn == true) {
-    uint32_t held = now - btnDownMs;
-    if (held >= 800) {
-      saveSettings();
-      saveHoursTotal();
-      notify("💾 Buton: Ayarlar + sayaç NVS'ye kaydedildi.");
+// =====================
+// Telegram
+// =====================
+static void handleTelegram() {
+  int numNew = bot.getUpdates(bot.last_message_received + 1);
+  Serial.print("[TG] getUpdates => "); Serial.println(numNew);
+
+  if (numNew <= 0) return;
+
+  while (numNew > 0) {
+    for (int i = 0; i < numNew; i++) {
+      telegramMessage& msg = bot.messages[i];
+
+      Serial.print("[TG] from_id="); Serial.print(msg.from_id);
+      Serial.print(" chat_id="); Serial.print(msg.chat_id);
+      Serial.print(" text="); Serial.println(msg.text);
+
+      String cmd = normalizeCommand(msg.text);
+
+      if (cmd == "/ping") {
+        tgSendTo(msg.chat_id, "pong ✅");
+      } else if (cmd == "/myid") {
+        String r = "chat_id: " + msg.chat_id + "\nfrom_id: " + msg.from_id + "\ntext: " + msg.text;
+        tgSendTo(msg.chat_id, r);
+      } else if (cmd == "/durum" || cmd == "/status") {
+        tgSendTo(msg.chat_id, buildStatusText());
+      } else {
+        tgSendTo(msg.chat_id, "Komut: /durum /ping /myid");
+      }
     }
+
+    numNew = bot.getUpdates(bot.last_message_received + 1);
+    Serial.print("[TG] getUpdates (loop) => "); Serial.println(numNew);
+    if (numNew <= 0) break;
   }
-  lastBtn = btn;
 }
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(200);
 
+  Serial.println();
+  Serial.println("=== BOOT ===");
+  Serial.print("Version: "); Serial.println(PROJECT_VERSION);
+
   analogReadResolution(12);
-  pinMode(PIN_BTN_SAVE, INPUT_PULLUP);
 
   loadSettings();
-  connectWiFi();
-  tgClient.setInsecure();
 
-  // İlk ölçüm 0.00V olmasın diye 2 kez ölç
+  // TLS ayarları
+  tgClient.setInsecure();
+  tgClient.setBufferSizes(1024, 1024);
+
+  connectWiFi();
+
+  // ölçüm 2 kez
   readAllMeasurements();
   delay(250);
   readAllMeasurements();
 
-  // İlk state'leri belirle (boot rapor doğru olsun)
   updateBatteryStatesOnly();
   g_mainsState = evalMains(g_meas.mainsV, MainsState::UNKNOWN);
   g_genState   = evalGen(g_meas.genV,   GenState::UNKNOWN);
 
   if (WiFi.status() == WL_CONNECTED) {
-    notify(buildBootReport());
-    // test amaçlı: botun komut aldığını görmek için
-    notify("ℹ️ Bot hazır. Test: /ping");
+    String boot = buildBootReport();
+    Serial.println("[TG] Boot message sending...");
+    tgSendBootBoth(boot);
+    tgSendBootBoth("ℹ️ Bot hazır. Test: /ping  | /myid");
+  } else {
+    Serial.println("[TG] skipped (WiFi not connected)");
   }
 
   g_stateAlertsArmed = true;
@@ -581,6 +529,7 @@ void setup() {
 }
 
 void loop() {
+  // WiFi watchdog
   if (WiFi.status() != WL_CONNECTED) {
     static uint32_t tRetry = 0;
     if (millis() - tRetry > 5000) {
@@ -589,33 +538,25 @@ void loop() {
     }
   }
 
-  handleSaveButton();
-
   uint32_t now = millis();
 
   if (now - tMeasure >= MEASURE_MS) {
     tMeasure = now;
-
     readAllMeasurements();
-
-    // aküler: sadece state güncelle (mesaj yok)
     updateBatteryStatesOnly();
-
-    // stage 8: şebeke/jeneratör state mesajları
     handleStateAlerts();
-
-    // çalışma saati
     updateGenHoursCounter();
   }
 
   if (now - tSerial >= SERIAL_REPORT_MS) {
     tSerial = now;
-    Serial.print("[v8.002] ");
-    Serial.print("Mains="); Serial.print(fmt2(g_meas.mainsV));
+    Serial.print("["); Serial.print(PROJECT_VERSION); Serial.print("] ");
+    Serial.print("WiFi="); Serial.print(WiFi.status() == WL_CONNECTED ? "OK" : "FAIL");
+    Serial.print(" IP="); Serial.print(WiFi.localIP());
+    Serial.print(" Mains="); Serial.print(fmt2(g_meas.mainsV));
     Serial.print(" Gen="); Serial.print(fmt2(g_meas.genV));
     Serial.print(" GenBatt="); Serial.print(fmt2(g_meas.genBattV));
     Serial.print(" CamBatt="); Serial.print(fmt2(g_meas.camBattV));
-    Serial.print(" Run="); Serial.print(g_genRunning ? "YES" : "NO");
     Serial.print(" Total="); Serial.print(fmtHMS(g_genRunTotalS));
     Serial.println();
   }
