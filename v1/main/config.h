@@ -1,5 +1,5 @@
 // =====================
-// config.h (v9.006 - LOW aktif röle + Backoff plan + retry info)
+// config.h (v9.008)
 // =====================
 #pragma once
 #include <stdint.h>
@@ -9,7 +9,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v9.006"
+#define PROJECT_VERSION "v9.008"
 
 // =====================
 // Cihaz Adı

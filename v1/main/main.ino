@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v9.006  (Aşama 9 + FAULT auto reset + backoff plan + retry başladığında kalan plan)
+// SÜRÜM v9.008  (/start: jeneratör zaten çalışıyorsa sekans başlatma + mesaj ver)
 // =====================
 
 #include <Arduino.h>
@@ -34,6 +34,7 @@ struct Settings {
   float hystBatt;
 
   // Stage 5
+  float calMainsDummy; // (yok) - uyum için bırakılmadı, gerçek alanlar aşağıda
   float genRunningV;
   uint16_t genRunConfirmS;
   uint32_t hoursSavePeriodS;
@@ -121,8 +122,8 @@ static uint16_t g_coolCounterS = 0;
 
 // FAULT runtime
 static uint16_t g_faultClearStreakS = 0;
-static uint8_t  g_faultRetryCount = 0;   // kaç retry denendi (denenecek olduğunda artırılır)
-static uint32_t g_faultNextRetryS = 0;   // uptimeS: bir sonraki retry zamanı
+static uint8_t  g_faultRetryCount = 0;
+static uint32_t g_faultNextRetryS = 0;
 
 // ---------------------
 // Relay Control (Fuel + Start + Stop)
@@ -310,7 +311,6 @@ static const char* autoStateText(AutoState st) {
 }
 
 static uint32_t faultBackoffDelayS(uint8_t retryIndexFrom0) {
-  // 0 -> base, 1 -> base*2, 2 -> base*4 ...
   uint32_t base = (uint32_t)g_set.faultRetryBaseS;
   uint8_t sh = retryIndexFrom0;
   if (sh > 15) sh = 15;
@@ -870,7 +870,6 @@ static void enterFaultWithSchedule(const String& why) {
 }
 
 static void notifyRetryStartingExtraInfo() {
-  // retryCount zaten artırılmış oluyor (örn: 1. retry başlıyor -> g_faultRetryCount=1)
   String remain = buildBackoffPlanText(g_faultRetryCount);
   notify(
     "📌 Kalan Plan: " + remain + "\n"
@@ -894,7 +893,6 @@ static void autoTick_1s() {
 
   autoFuelPolicy();
 
-  // ---- FAULT: auto reset + backoff retry
   if (g_autoState == AutoState::FAULT) {
     if (mainsIsGoodToStop()) {
       if (g_faultClearStreakS < 65000) g_faultClearStreakS++;
@@ -911,7 +909,7 @@ static void autoTick_1s() {
     if (!isGenRunningNow() && mainsIsBadForAuto() && !autoStartBlockedByBatt()) {
       if (g_faultRetryCount < g_set.faultMaxRetries && g_faultNextRetryS > 0) {
         if (g_meas.uptimeS >= g_faultNextRetryS) {
-          g_faultRetryCount++;     // bu retry denenecek
+          g_faultRetryCount++;
           g_faultNextRetryS = 0;
 
           notify("🧯 FAULT: Auto-retry #" + String(g_faultRetryCount) + " başlıyor");
@@ -926,7 +924,6 @@ static void autoTick_1s() {
     return;
   }
 
-  // ---- Normal AUTO akışı
   switch (g_autoState) {
     case AutoState::IDLE: {
       g_failStreakS = 0;
@@ -941,15 +938,9 @@ static void autoTick_1s() {
     }
 
     case AutoState::WAIT_FAIL_CONFIRM: {
-      if (isGenRunningNow()) {
-        autoSetState(AutoState::RUNNING, "Jeneratör zaten çalışıyor");
-        break;
-      }
+      if (isGenRunningNow()) { autoSetState(AutoState::RUNNING, "Jeneratör zaten çalışıyor"); break; }
 
-      if (autoStartBlockedByBatt()) {
-        enterFaultWithSchedule("Akü KRİTİK, auto-start bloklandı");
-        break;
-      }
+      if (autoStartBlockedByBatt()) { enterFaultWithSchedule("Akü KRİTİK, auto-start bloklandı"); break; }
 
       if (mainsIsBadForAuto()) {
         if (g_failStreakS < 65000) g_failStreakS++;
@@ -967,11 +958,8 @@ static void autoTick_1s() {
 
     case AutoState::STARTING: {
       if (!g_startSeq.active) {
-        if (isGenRunningNow()) {
-          autoSetState(AutoState::RUNNING, "Start başarılı");
-        } else {
-          enterFaultWithSchedule("Start başarısız");
-        }
+        if (isGenRunningNow()) autoSetState(AutoState::RUNNING, "Start başarılı");
+        else enterFaultWithSchedule("Start başarısız");
       }
       break;
     }
@@ -985,10 +973,7 @@ static void autoTick_1s() {
     }
 
     case AutoState::WAIT_RETURN_CONFIRM: {
-      if (!isGenRunningNow()) {
-        autoSetState(AutoState::IDLE, "Jeneratör durmuş");
-        break;
-      }
+      if (!isGenRunningNow()) { autoSetState(AutoState::IDLE, "Jeneratör durmuş"); break; }
 
       if (mainsIsGoodToStop()) {
         if (g_returnStreakS < 65000) g_returnStreakS++;
@@ -1005,10 +990,7 @@ static void autoTick_1s() {
     }
 
     case AutoState::COOLDOWN: {
-      if (!isGenRunningNow()) {
-        autoSetState(AutoState::IDLE, "Cooldown bitmeden durmuş");
-        break;
-      }
+      if (!isGenRunningNow()) { autoSetState(AutoState::IDLE, "Cooldown bitmeden durmuş"); break; }
 
       if (mainsIsBadForAuto()) {
         g_coolCounterS = 0;
@@ -1017,7 +999,6 @@ static void autoTick_1s() {
       }
 
       if (g_coolCounterS < 65000) g_coolCounterS++;
-
       if (g_coolCounterS >= g_set.cooldownS) {
         g_coolCounterS = 0;
         autoSetState(AutoState::STOPPING, "Stop veriliyor");
@@ -1028,11 +1009,8 @@ static void autoTick_1s() {
 
     case AutoState::STOPPING: {
       if (!g_stopSeq.active) {
-        if (!isGenRunningNow()) {
-          autoSetState(AutoState::IDLE, "Stop başarılı");
-        } else {
-          enterFaultWithSchedule("Stop başarısız (lockout)");
-        }
+        if (!isGenRunningNow()) autoSetState(AutoState::IDLE, "Stop başarılı");
+        else enterFaultWithSchedule("Stop başarısız (lockout)");
       }
       break;
     }
@@ -1084,10 +1062,24 @@ static String buildStatusText() {
 }
 
 // =====================
-// Telegram
+// Telegram - MANUAL /start /stop
 // =====================
-static void handleManualStart(const String& /*chatId*/) { /* bu sürümde kısaltıldı */ }
-static void handleManualStop (const String& /*chatId*/) { /* bu sürümde kısaltıldı */ }
+static void handleManualStart(const String& chatId) {
+  if (g_mode == MODE_AUTO) { bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", ""); return; }
+  if (isGenRunningNow())   { bot.sendMessage(chatId, "✅ Jeneratör zaten çalışıyor. Start yapılmadı.", ""); return; } // ✅ eklendi
+  if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
+
+  startSeqBegin(true);
+  bot.sendMessage(chatId, "🟡 MANUAL: Start sekansı başladı.", "");
+}
+
+static void handleManualStop(const String& chatId) {
+  if (g_mode == MODE_AUTO) { bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", ""); return; }
+  if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
+
+  stopSeqBegin(true);
+  bot.sendMessage(chatId, "🟥 MANUAL: Stop sekansı başladı.", "");
+}
 
 static void handleTelegram() {
   int numNew = bot.getUpdates(bot.last_message_received + 1);
@@ -1127,6 +1119,12 @@ static void handleTelegram() {
         saveSettings();
         bot.sendMessage(msg.chat_id, "✅ Mod: MANUAL", "");
 
+      } else if (cmd == "/start") {
+        handleManualStart(msg.chat_id);
+
+      } else if (cmd == "/stop") {
+        handleManualStop(msg.chat_id);
+
       } else if (cmd == "/cooldown") {
         int v = arg1.toInt();
         if (v <= 0) bot.sendMessage(msg.chat_id, "Kullanım: /cooldown 120 (sn)", "");
@@ -1142,6 +1140,7 @@ static void handleTelegram() {
         h += "Komutlar:\n";
         h += "/durum\n";
         h += "/auto /manual\n";
+        h += "/start /stop (sadece MANUAL)\n";
         h += "/cooldown <sn>\n";
         h += "/autostart <V>\n";
         h += "/save /reset_hours /ping\n";
@@ -1149,7 +1148,7 @@ static void handleTelegram() {
 
       } else {
         bot.sendMessage(msg.chat_id,
-          "Komut: /durum /auto /manual /cooldown /autostart /save /reset_hours /ping",
+          "Komut: /durum /auto /manual /start /stop /cooldown /autostart /save /reset_hours /ping",
           "");
       }
     }
