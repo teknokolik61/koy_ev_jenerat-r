@@ -1,5 +1,5 @@
 // =====================
-// config.h (v9.008)
+// config.h (v9.009)
 // =====================
 #pragma once
 #include <stdint.h>
@@ -9,7 +9,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v9.008"
+#define PROJECT_VERSION "v9.009"
 
 // =====================
 // Cihaz Adı
@@ -45,6 +45,7 @@ inline constexpr uint8_t PIN_BTN_SAVE = 27;
 
 // =====================
 // Stage 9 - Relay Control (LOW aktif)
+// Not: ENABLE_RELAY_CONTROL=0 iken röleler fiziksel çıkış vermez.
 // =====================
 #define ENABLE_RELAY_CONTROL 0
 
@@ -63,9 +64,11 @@ inline constexpr uint16_t RELAY_SAFE_GAP_MS = 80;
 inline constexpr uint16_t ADC_MAX  = 4095;
 inline constexpr float    ADC_VREF = 3.3f;
 
+// Divider oranları (örnek 120k / 33k)
 inline constexpr float GEN_BATT_DIV_RATIO = 4.63636f;
 inline constexpr float CAM_BATT_DIV_RATIO = 4.63636f;
 
+// AC sensör kalibrasyonları (ZMPT101B vb.)
 inline constexpr float CAL_MAINS = 240.0f;
 inline constexpr float CAL_GEN   = 240.0f;
 

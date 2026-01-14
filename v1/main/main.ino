@@ -1,5 +1,7 @@
 // =====================
-// SÜRÜM v9.008  (/start: jeneratör zaten çalışıyorsa sekans başlatma + mesaj ver)
+// SÜRÜM v9.009
+// /start: jeneratör zaten çalışıyorsa sekans başlatma + mesaj
+// /stop : jeneratör zaten durmuşsa sekans başlatma + mesaj
 // =====================
 
 #include <Arduino.h>
@@ -34,7 +36,6 @@ struct Settings {
   float hystBatt;
 
   // Stage 5
-  float calMainsDummy; // (yok) - uyum için bırakılmadı, gerçek alanlar aşağıda
   float genRunningV;
   uint16_t genRunConfirmS;
   uint32_t hoursSavePeriodS;
@@ -1066,7 +1067,7 @@ static String buildStatusText() {
 // =====================
 static void handleManualStart(const String& chatId) {
   if (g_mode == MODE_AUTO) { bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", ""); return; }
-  if (isGenRunningNow())   { bot.sendMessage(chatId, "✅ Jeneratör zaten çalışıyor. Start yapılmadı.", ""); return; } // ✅ eklendi
+  if (isGenRunningNow())   { bot.sendMessage(chatId, "✅ Jeneratör zaten çalışıyor. Start yapılmadı.", ""); return; }
   if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
 
   startSeqBegin(true);
@@ -1075,6 +1076,7 @@ static void handleManualStart(const String& chatId) {
 
 static void handleManualStop(const String& chatId) {
   if (g_mode == MODE_AUTO) { bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", ""); return; }
+  if (!isGenRunningNow())  { bot.sendMessage(chatId, "✅ Jeneratör zaten durmuş. Stop yapılmadı.", ""); return; } // ✅ eklendi
   if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
 
   stopSeqBegin(true);
@@ -1128,12 +1130,18 @@ static void handleTelegram() {
       } else if (cmd == "/cooldown") {
         int v = arg1.toInt();
         if (v <= 0) bot.sendMessage(msg.chat_id, "Kullanım: /cooldown 120 (sn)", "");
-        else { g_set.cooldownS = (uint16_t)constrain(v, 5, 3600); bot.sendMessage(msg.chat_id, "✅ Cooldown=" + String(g_set.cooldownS) + "s (Kaydetmek için /save)", ""); }
+        else {
+          g_set.cooldownS = (uint16_t)constrain(v, 5, 3600);
+          bot.sendMessage(msg.chat_id, "✅ Cooldown=" + String(g_set.cooldownS) + "s (Kaydetmek için /save)", "");
+        }
 
       } else if (cmd == "/autostart") {
         float v = arg1.toFloat();
         if (v <= 0) bot.sendMessage(msg.chat_id, "Kullanım: /autostart 160 (V)", "");
-        else { g_set.autoStartMainsV = v; bot.sendMessage(msg.chat_id, "✅ AutoStart=" + fmt2(g_set.autoStartMainsV) + "V (Kaydetmek için /save)", ""); }
+        else {
+          g_set.autoStartMainsV = v;
+          bot.sendMessage(msg.chat_id, "✅ AutoStart=" + fmt2(g_set.autoStartMainsV) + "V (Kaydetmek için /save)", "");
+        }
 
       } else if (cmd == "/help" || cmd == "/yardim" || cmd == "/yardım") {
         String h;
