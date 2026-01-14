@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v8.003
+// SÜRÜM v8.004
 // =====================
 
 #include <Arduino.h>
@@ -124,7 +124,7 @@ static void tgSendBootBoth(const String& msg) {
   // 1) Grup CHAT_ID
   tgSendTo(String(CHAT_ID), msg);
 
-  // 2) Admin'a özel mesaj denemesi (çoğu zaman user chat_id = user id)
+  // 2) Admin'a özel mesaj denemesi
   String adminChat = String(MASTER_ADMIN_ID);
   if (adminChat != String(CHAT_ID)) {
     tgSendTo(adminChat, msg);
@@ -262,22 +262,18 @@ static BattState evalBatt(float v, BattState prev) {
     case BattState::HIGH_V:
       if (v <= g_set.battHigh - h) return BattState::NORMAL;
       return BattState::HIGH_V;
-
     case BattState::NORMAL:
       if (v >= g_set.battHigh) return BattState::HIGH_V;
       if (v <  g_set.battCrit) return BattState::CRITICAL;
       if (v <  g_set.battLow)  return BattState::LOW_V;
       return BattState::NORMAL;
-
     case BattState::LOW_V:
       if (v >= g_set.battNormMin + h) return BattState::NORMAL;
       if (v <  g_set.battCrit)        return BattState::CRITICAL;
       return BattState::LOW_V;
-
     case BattState::CRITICAL:
       if (v >= g_set.battLow + h) return BattState::LOW_V;
       return BattState::CRITICAL;
-
     default:
       if (v >= g_set.battHigh) return BattState::HIGH_V;
       if (v <  g_set.battCrit) return BattState::CRITICAL;
@@ -292,116 +288,51 @@ static void updateBatteryStatesOnly() {
 }
 
 // =====================
-// MAINS/GEN state + alerts
+// MAINS/GEN state + alerts (minimal for debug)
 // =====================
-static String mainsLine(MainsState st, float v) {
-  switch (st) {
-    case MainsState::CRITICAL: return "🚨 Şebeke KRİTİK: " + fmt2(v) + "V";
-    case MainsState::LOW_V:    return "⚠️ Şebeke DÜŞÜK: " + fmt2(v) + "V";
-    case MainsState::HIGH_V:   return "⚠️ Şebeke YÜKSEK: " + fmt2(v) + "V";
-    case MainsState::NORMAL:   return "✅ Şebeke NORMAL: " + fmt2(v) + "V";
-    default:                   return "ℹ️ Şebeke: " + fmt2(v) + "V";
-  }
+static String buildBootReport() {
+  String s;
+  s += String(DEVICE_NAME) + "\n";
+  s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
+  s += "🔌 Şebeke: " + fmt2(g_meas.mainsV) + " V\n";
+  s += "🟠 Jeneratör: " + fmt2(g_meas.genV) + " V\n";
+  s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + " V (" + battStateToText(g_genBattState) + ")\n";
+  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V (" + battStateToText(g_camBattState) + ")\n";
+  s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
+  return s;
 }
 
-static String genLine(GenState st, float v) {
-  switch (st) {
-    case GenState::OFF:     return "⛔ Jeneratör OFF: " + fmt2(v) + "V";
-    case GenState::LOW_V:   return "⚠️ Jeneratör DÜŞÜK: " + fmt2(v) + "V";
-    case GenState::HIGH_V:  return "⚠️ Jeneratör YÜKSEK: " + fmt2(v) + "V";
-    case GenState::NORMAL:  return "✅ Jeneratör NORMAL: " + fmt2(v) + "V";
-    default:                return "ℹ️ Jeneratör: " + fmt2(v) + "V";
-  }
-}
+static void handleTelegram() {
+  int numNew = bot.getUpdates(bot.last_message_received + 1);
+  Serial.print("[TG] getUpdates => "); Serial.println(numNew);
 
-static MainsState evalMains(float v, MainsState prev) {
-  float h = g_set.hystAc;
-  switch (prev) {
-    case MainsState::CRITICAL: if (v >= g_set.mainsCrit + h) return MainsState::LOW_V; return MainsState::CRITICAL;
-    case MainsState::LOW_V:
-      if (v < g_set.mainsCrit) return MainsState::CRITICAL;
-      if (v >= g_set.mainsLow + h) return MainsState::NORMAL;
-      return MainsState::LOW_V;
-    case MainsState::NORMAL:
-      if (v >= g_set.mainsHigh) return MainsState::HIGH_V;
-      if (v <  g_set.mainsLow)  return MainsState::LOW_V;
-      return MainsState::NORMAL;
-    case MainsState::HIGH_V: if (v <= g_set.mainsHigh - h) return MainsState::NORMAL; return MainsState::HIGH_V;
-    default:
-      if (v < g_set.mainsCrit) return MainsState::CRITICAL;
-      if (v < g_set.mainsLow)  return MainsState::LOW_V;
-      if (v >= g_set.mainsHigh) return MainsState::HIGH_V;
-      return MainsState::NORMAL;
-  }
-}
+  if (numNew <= 0) return;
 
-static GenState evalGen(float v, GenState prev) {
-  float h = g_set.hystAc;
-  switch (prev) {
-    case GenState::OFF: if (v >= g_set.genOff + h) return GenState::LOW_V; return GenState::OFF;
-    case GenState::LOW_V:
-      if (v < g_set.genOff) return GenState::OFF;
-      if (v >= g_set.genNormMin + h) return GenState::NORMAL;
-      return GenState::LOW_V;
-    case GenState::NORMAL:
-      if (v > g_set.genNormMax) return GenState::HIGH_V;
-      if (v < g_set.genLow)     return GenState::LOW_V;
-      return GenState::NORMAL;
-    case GenState::HIGH_V: if (v <= g_set.genNormMax - h) return GenState::NORMAL; return GenState::HIGH_V;
-    default:
-      if (v < g_set.genOff) return GenState::OFF;
-      if (v < g_set.genLow) return GenState::LOW_V;
-      if (v > g_set.genNormMax) return GenState::HIGH_V;
-      return GenState::NORMAL;
-  }
-}
+  while (numNew > 0) {
+    for (int i = 0; i < numNew; i++) {
+      telegramMessage& msg = bot.messages[i];
 
-static void handleStateAlerts() {
-  if (!ENABLE_TG_STATE_ALERTS) return;
-  if (!g_stateAlertsArmed) return;
+      Serial.print("[TG] from_id="); Serial.print(msg.from_id);
+      Serial.print(" chat_id="); Serial.print(msg.chat_id);
+      Serial.print(" text="); Serial.println(msg.text);
 
-  MainsState nm = evalMains(g_meas.mainsV, g_mainsState);
-  if (nm != g_mainsState) {
-    g_mainsState = nm;
-    tgSendTo(String(CHAT_ID), mainsLine(g_mainsState, g_meas.mainsV));
-  }
+      String cmd = normalizeCommand(msg.text);
 
-  GenState ng = evalGen(g_meas.genV, g_genState);
-  if (ng != g_genState) {
-    g_genState = ng;
-    tgSendTo(String(CHAT_ID), genLine(g_genState, g_meas.genV));
-  }
-}
-
-// =====================
-// Hours Counter
-// =====================
-static void updateGenHoursCounter() {
-  bool above = (g_meas.genV >= g_set.genRunningV);
-
-  if (above) {
-    if (g_genRunStreakS < 65000) g_genRunStreakS++;
-  } else {
-    g_genRunStreakS = 0;
-    g_genRunning = false;
-  }
-
-  if (!g_genRunning && g_genRunStreakS >= g_set.genRunConfirmS) {
-    g_genRunning = true;
-    tgSendTo(String(CHAT_ID), "▶️ Jeneratör ÇALIŞIYOR (sayaç başladı)");
-  }
-
-  if (g_genRunning) {
-    g_genRunTotalS += 1;
-    if (!above) {
-      g_genRunning = false;
-      tgSendTo(String(CHAT_ID), "⏹️ Jeneratör DURDU (sayaç durdu)");
+      if (cmd == "/ping") {
+        tgSendTo(msg.chat_id, "pong ✅");
+      } else if (cmd == "/myid") {
+        String r = "chat_id: " + msg.chat_id + "\nfrom_id: " + msg.from_id + "\ntext: " + msg.text;
+        tgSendTo(msg.chat_id, r);
+      } else if (cmd == "/durum" || cmd == "/status") {
+        tgSendTo(msg.chat_id, buildBootReport());
+      } else {
+        tgSendTo(msg.chat_id, "Komut: /durum /ping /myid");
+      }
     }
-  }
 
-  if (g_meas.uptimeS - g_lastHoursSaveS >= g_set.hoursSavePeriodS) {
-    g_lastHoursSaveS = g_meas.uptimeS;
-    saveHoursTotal();
+    numNew = bot.getUpdates(bot.last_message_received + 1);
+    Serial.print("[TG] getUpdates (loop) => "); Serial.println(numNew);
+    if (numNew <= 0) break;
   }
 }
 
@@ -428,62 +359,6 @@ static void readAllMeasurements() {
   g_meas.camBattV = lpf(g_meas.camBattV, g_meas.camBattV_raw, LPF_ALPHA_BATT);
 }
 
-// =====================
-// Boot report + /durum
-// =====================
-static String buildBootReport() {
-  String s;
-  s += String(DEVICE_NAME) + "\n";
-  s += "🔖 Sürüm: " + String(PROJECT_VERSION) + "\n";
-  s += mainsLine(g_mainsState, g_meas.mainsV) + "\n";
-  s += genLine(g_genState, g_meas.genV) + "\n";
-  s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + "V (" + battStateToText(g_genBattState) + ")\n";
-  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + "V (" + battStateToText(g_camBattState) + ")\n";
-  s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
-  return s;
-}
-
-static String buildStatusText() {
-  return buildBootReport();
-}
-
-// =====================
-// Telegram
-// =====================
-static void handleTelegram() {
-  int numNew = bot.getUpdates(bot.last_message_received + 1);
-  Serial.print("[TG] getUpdates => "); Serial.println(numNew);
-
-  if (numNew <= 0) return;
-
-  while (numNew > 0) {
-    for (int i = 0; i < numNew; i++) {
-      telegramMessage& msg = bot.messages[i];
-
-      Serial.print("[TG] from_id="); Serial.print(msg.from_id);
-      Serial.print(" chat_id="); Serial.print(msg.chat_id);
-      Serial.print(" text="); Serial.println(msg.text);
-
-      String cmd = normalizeCommand(msg.text);
-
-      if (cmd == "/ping") {
-        tgSendTo(msg.chat_id, "pong ✅");
-      } else if (cmd == "/myid") {
-        String r = "chat_id: " + msg.chat_id + "\nfrom_id: " + msg.from_id + "\ntext: " + msg.text;
-        tgSendTo(msg.chat_id, r);
-      } else if (cmd == "/durum" || cmd == "/status") {
-        tgSendTo(msg.chat_id, buildStatusText());
-      } else {
-        tgSendTo(msg.chat_id, "Komut: /durum /ping /myid");
-      }
-    }
-
-    numNew = bot.getUpdates(bot.last_message_received + 1);
-    Serial.print("[TG] getUpdates (loop) => "); Serial.println(numNew);
-    if (numNew <= 0) break;
-  }
-}
-
 void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(200);
@@ -496,9 +371,8 @@ void setup() {
 
   loadSettings();
 
-  // TLS ayarları
+  // TLS
   tgClient.setInsecure();
-  tgClient.setBufferSizes(1024, 1024);
 
   connectWiFi();
 
@@ -508,28 +382,21 @@ void setup() {
   readAllMeasurements();
 
   updateBatteryStatesOnly();
-  g_mainsState = evalMains(g_meas.mainsV, MainsState::UNKNOWN);
-  g_genState   = evalGen(g_meas.genV,   GenState::UNKNOWN);
 
   if (WiFi.status() == WL_CONNECTED) {
-    String boot = buildBootReport();
     Serial.println("[TG] Boot message sending...");
-    tgSendBootBoth(boot);
+    tgSendBootBoth(buildBootReport());
     tgSendBootBoth("ℹ️ Bot hazır. Test: /ping  | /myid");
   } else {
     Serial.println("[TG] skipped (WiFi not connected)");
   }
 
-  g_stateAlertsArmed = true;
-
   tMeasure = millis();
   tSerial  = millis();
   tTgPoll  = millis();
-  g_lastHoursSaveS = 0;
 }
 
 void loop() {
-  // WiFi watchdog
   if (WiFi.status() != WL_CONNECTED) {
     static uint32_t tRetry = 0;
     if (millis() - tRetry > 5000) {
@@ -544,8 +411,6 @@ void loop() {
     tMeasure = now;
     readAllMeasurements();
     updateBatteryStatesOnly();
-    handleStateAlerts();
-    updateGenHoursCounter();
   }
 
   if (now - tSerial >= SERIAL_REPORT_MS) {
