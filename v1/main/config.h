@@ -1,13 +1,15 @@
 // =====================
-// config.h (v8.007)
+// config.h (v8.008)
 // =====================
 #pragma once
 #include <stdint.h>
 
+#include "sifre.h"   // <-- WiFi/Telegram gizli bilgiler burada
+
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v8.007"
+#define PROJECT_VERSION "v8.008"
 
 // =====================
 // Cihaz Adı
@@ -20,15 +22,8 @@ inline constexpr const char* DEVICE_NAME = "Jeneratör köy";
 inline constexpr uint32_t SERIAL_BAUD = 115200;
 
 // =====================
-// WiFi / Telegram
+// Telegram
 // =====================
-inline constexpr const char* WIFI_SSID = "SSID_YAZ";
-inline constexpr const char* WIFI_PASS = "PASS_YAZ";
-
-inline constexpr const char* BOT_TOKEN = "YENI_TOKEN_BURAYA";   // <-- eski token yerine bunu
-inline constexpr const char* CHAT_ID   = "-1001234567890";      // <-- grup id (örnek)
-inline constexpr long MASTER_ADMIN_ID  = 123456789;             // <-- senin Telegram user id
-
 inline constexpr uint32_t TG_POLL_MS = 1200;
 inline constexpr bool ENABLE_TG_STATE_ALERTS = true;
 
