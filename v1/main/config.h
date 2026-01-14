@@ -1,5 +1,5 @@
 // =====================
-// config.h (v9.004 - LOW aktif röle + FAULT exponential backoff)
+// config.h (v9.005 - LOW aktif röle + Backoff plan bildirimi)
 // =====================
 #pragma once
 #include <stdint.h>
@@ -9,7 +9,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v9.004"
+#define PROJECT_VERSION "v9.005"
 
 // =====================
 // Cihaz Adı
@@ -151,7 +151,7 @@ inline constexpr bool AUTO_BLOCK_ON_BATT_CRIT = true;
 // =====================
 // FAULT exponential backoff retry
 // =====================
-// Delay = BASE * 2^(retryCount), cap = MAX
-inline constexpr uint8_t  FAULT_MAX_RETRIES   = 3;     // kaç kez retry denesin
-inline constexpr uint16_t FAULT_RETRY_BASE_S  = 180;   // 3 dk (1. retry için)
-inline constexpr uint16_t FAULT_RETRY_MAX_S   = 1800;  // 30 dk cap (istersen büyüt)
+// Delay = BASE * 2^(retryIndexFrom0), cap = MAX
+inline constexpr uint8_t  FAULT_MAX_RETRIES   = 3;     // 3 deneme: 3dk -> 6dk -> 12dk
+inline constexpr uint16_t FAULT_RETRY_BASE_S  = 180;   // 3 dk
+inline constexpr uint16_t FAULT_RETRY_MAX_S   = 1800;  // 30 dk cap

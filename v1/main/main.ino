@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v9.004  (Aşama 9 + FAULT auto reset + exponential backoff retry)
+// SÜRÜM v9.005  (Aşama 9 + FAULT auto reset + backoff plan bildirimi)
 // =====================
 
 #include <Arduino.h>
@@ -55,7 +55,7 @@ struct Settings {
   uint8_t  stopMaxAttempts;
   uint16_t fuelOffDelayMs;
 
-  // FAULT auto retry
+  // FAULT retry (exponential backoff)
   uint8_t  faultMaxRetries;
   uint16_t faultRetryBaseS;
   uint16_t faultRetryMaxS;
@@ -90,7 +90,6 @@ enum class GenState   : uint8_t { UNKNOWN, OFF,      LOW_V, NORMAL, HIGH_V };
 static MainsState g_mainsState = MainsState::UNKNOWN;
 static GenState   g_genState   = GenState::UNKNOWN;
 
-// Boot sonrası ilk ölçümlerde ekstra mesaj atmasın diye
 static bool g_stateAlertsArmed = false;
 
 // ---------------------
@@ -120,10 +119,10 @@ static uint16_t g_failStreakS = 0;
 static uint16_t g_returnStreakS = 0;
 static uint16_t g_coolCounterS = 0;
 
-// FAULT auto reset/retry runtime
+// FAULT runtime
 static uint16_t g_faultClearStreakS = 0;
-static uint8_t  g_faultRetryCount = 0;
-static uint32_t g_faultNextRetryS = 0;  // uptimeS olarak "bir sonraki retry zamanı"
+static uint8_t  g_faultRetryCount = 0;   // kaç retry denendi (başarı/başarısız fark etmez)
+static uint32_t g_faultNextRetryS = 0;   // uptimeS: bir sonraki retry zamanı
 
 // ---------------------
 // Relay Control (Fuel + Start + Stop)
@@ -166,7 +165,6 @@ static void relayInit() {
   relayAllOffNow();
 }
 
-// START/STOP interlock + safe gap
 static void safeSetStart(bool on) {
 #if ENABLE_RELAY_CONTROL
   if (on && g_stopOn) {
@@ -202,7 +200,6 @@ static void relayPulse(uint8_t pin, uint16_t ms) {
 #if ENABLE_RELAY_CONTROL
   if (pin == PIN_RELAY_START) { safeSetStop(false); safeSetStart(true); }
   if (pin == PIN_RELAY_STOP)  { safeSetStart(false); safeSetStop(true); }
-
   g_pulseActive = true;
   g_pulsePin = pin;
   g_pulseUntilMs = millis() + (uint32_t)ms;
@@ -240,12 +237,19 @@ static String fmtHMS(uint64_t totalS) {
   return String((unsigned long)h) + "h " + String((unsigned long)m) + "m " + String((unsigned long)s) + "s";
 }
 
+static String fmtDurTR(uint32_t sec) {
+  uint32_t m = sec / 60U;
+  uint32_t s = sec % 60U;
+  if (m == 0) return String(s) + "sn";
+  if (s == 0) return String(m) + "dk";
+  return String(m) + "dk " + String(s) + "sn";
+}
+
 static float lpf(float prev, float x, float a) {
   if (isnan(prev) || isinf(prev)) return x;
   return prev + a * (x - prev);
 }
 
-// "/durum@botadi arg" -> "/durum"
 static String normalizeCommand(const String& textRaw) {
   String t = textRaw;
   t.trim();
@@ -305,16 +309,32 @@ static const char* autoStateText(AutoState st) {
   }
 }
 
-static uint32_t faultBackoffDelayS(uint8_t retryCount) {
-  // retryCount: 0 -> base, 1 -> base*2, 2 -> base*4 ...
-  // cap: faultRetryMaxS
+static uint32_t faultBackoffDelayS(uint8_t retryIndexFrom0) {
+  // 0 -> base, 1 -> base*2, 2 -> base*4 ...
   uint32_t base = (uint32_t)g_set.faultRetryBaseS;
-  uint32_t d = base;
-  uint8_t shift = retryCount;
-  if (shift > 15) shift = 15;
-  d = base << shift;
+  uint8_t sh = retryIndexFrom0;
+  if (sh > 15) sh = 15;
+  uint32_t d = base << sh;
   if (d > (uint32_t)g_set.faultRetryMaxS) d = (uint32_t)g_set.faultRetryMaxS;
   return d;
+}
+
+static String buildBackoffPlanText(uint8_t alreadyTriedCount) {
+  // alreadyTriedCount = kaç retry denendi
+  if (alreadyTriedCount >= g_set.faultMaxRetries) return "Plan yok (limit doldu)";
+
+  String s;
+  uint8_t startIdx = alreadyTriedCount; // bir sonraki retry hangi index?
+  uint8_t endIdx = g_set.faultMaxRetries - 1;
+
+  for (uint8_t i = startIdx; i <= endIdx; i++) {
+    uint32_t d = faultBackoffDelayS(i);
+    s += fmtDurTR(d);
+    if (i != endIdx) s += " → ";
+  }
+
+  if (g_set.faultRetryMaxS > 0) s += " (cap: " + fmtDurTR(g_set.faultRetryMaxS) + ")";
+  return s;
 }
 
 // =====================
@@ -476,7 +496,7 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
 }
 
 // =====================
-// Battery State (only compute)
+// Battery State
 // =====================
 static String battStateToText(BattState st) {
   switch (st) {
@@ -490,7 +510,6 @@ static String battStateToText(BattState st) {
 
 static BattState evalBatt(float v, BattState prev) {
   float h = g_set.hystBatt;
-
   switch (prev) {
     case BattState::HIGH_V:
       if (v <= g_set.battHigh - h) return BattState::NORMAL;
@@ -549,7 +568,6 @@ static String genStateLine(GenState st, float v) {
 
 static MainsState evalMains(float v, MainsState prev) {
   float h = g_set.hystAc;
-
   switch (prev) {
     case MainsState::CRITICAL:
       if (v >= g_set.mainsCrit + h) return MainsState::LOW_V;
@@ -579,7 +597,6 @@ static MainsState evalMains(float v, MainsState prev) {
 
 static GenState evalGen(float v, GenState prev) {
   float h = g_set.hystAc;
-
   switch (prev) {
     case GenState::OFF:
       if (v >= g_set.genOff + h) return GenState::LOW_V;
@@ -659,13 +676,13 @@ static void updateGenHoursCounter_1s() {
 // =====================
 // Stage 9 - Start/Stop Sequences
 // =====================
-enum class StartSub : uint8_t { IDLE, PRIME, CRANK, SENSE, REST, DONE, FAIL };
-enum class StopSub  : uint8_t { IDLE, PULSE, VERIFY, DONE, FAIL };
+enum class StartSub : uint8_t { PRIME, CRANK, SENSE, REST };
+enum class StopSub  : uint8_t { PULSE, VERIFY };
 
 struct StartSeq {
   bool active = false;
   bool manual = false;
-  StartSub sub = StartSub::IDLE;
+  StartSub sub = StartSub::PRIME;
   uint32_t untilMs = 0;
   uint8_t attempt = 0;
 } g_startSeq;
@@ -673,7 +690,7 @@ struct StartSeq {
 struct StopSeq {
   bool active = false;
   bool manual = false;
-  StopSub sub = StopSub::IDLE;
+  StopSub sub = StopSub::PULSE;
   uint32_t untilMs = 0;
   uint8_t attempt = 0;
   uint32_t fuelOffAtMs = 0;
@@ -748,9 +765,6 @@ static void startSeqService() {
       g_startSeq.sub = StartSub::CRANK;
       g_startSeq.untilMs = now;
       break;
-
-    default:
-      break;
   }
 }
 
@@ -800,9 +814,6 @@ static void stopSeqService() {
         g_stopSeq.untilMs = now + 120;
       }
       break;
-
-    default:
-      break;
   }
 }
 
@@ -818,10 +829,9 @@ static bool mainsIsGoodToStop() {
 static void autoSetState(AutoState st, const String& reasonMsg = "") {
   if (st == g_autoState) return;
 
-  // FAULT giriş/çıkış bakımı
   if (st == AutoState::FAULT) {
     g_faultClearStreakS = 0;
-    g_faultNextRetryS = 0; // birazdan hesaplanacak
+    g_faultNextRetryS = 0;
   }
   if (g_autoState == AutoState::FAULT && st != AutoState::FAULT) {
     g_faultClearStreakS = 0;
@@ -840,7 +850,6 @@ static void autoSetState(AutoState st, const String& reasonMsg = "") {
 static void autoFuelPolicy() {
   if (g_mode != MODE_AUTO) return;
 
-  // Yakıt: motor çalışırken sürekli ON. FAULT/IDLE'da OFF.
   switch (g_autoState) {
     case AutoState::STARTING:
     case AutoState::RUNNING:
@@ -859,19 +868,19 @@ static void autoFuelPolicy() {
 
 static void enterFaultWithSchedule(const String& why) {
   autoSetState(AutoState::FAULT, why);
-
-  // Güvenlik: yakıtı kapat
   safeSetFuel(false);
 
-  // retry planı (exponential backoff)
   if (g_faultRetryCount < g_set.faultMaxRetries) {
-    uint32_t d = faultBackoffDelayS(g_faultRetryCount); // ilk FAULT'ta retryCount=0 -> base
+    uint32_t d = faultBackoffDelayS(g_faultRetryCount);  // bir sonraki retry gecikmesi
     g_faultNextRetryS = g_meas.uptimeS + d;
-    notify("🧯 FAULT: Auto-retry planlandı: " + String(d) + "s sonra ("
-           + String(g_faultRetryCount + 1) + "/" + String(g_set.faultMaxRetries) + ")");
+
+    String plan = buildBackoffPlanText(g_faultRetryCount);
+    notify("🧯 FAULT: Auto-retry " + fmtDurTR(d) + " sonra. ("
+           + String(g_faultRetryCount + 1) + "/" + String(g_set.faultMaxRetries) + ")\n"
+           + "📌 Backoff Plan: " + plan);
   } else {
     g_faultNextRetryS = 0;
-    notify("🧯 FAULT: Auto-retry limiti doldu. Şebeke normale dönünce auto-reset.");
+    notify("🧯 FAULT: Auto-retry limiti doldu.\n📌 Şebeke normale dönünce auto-reset olacak.");
   }
 }
 
@@ -899,17 +908,18 @@ static void autoTick_1s() {
     } else {
       g_faultClearStreakS = 0;
     }
+
     if (g_faultClearStreakS >= g_set.mainsReturnConfirmS) {
       autoSetState(AutoState::IDLE, "FAULT auto-reset (şebeke normal)");
       safeSetFuel(false);
       return;
     }
 
-    // 2) Şebeke hâlâ kötü + jeneratör çalışmıyor + akü kritik değil -> retry zamanı geldiyse
+    // 2) Şebeke hâlâ kötü + jeneratör çalışmıyor + akü kritik değil -> retry zamanı
     if (!isGenRunningNow() && mainsIsBadForAuto() && !autoStartBlockedByBatt()) {
       if (g_faultRetryCount < g_set.faultMaxRetries && g_faultNextRetryS > 0) {
         if (g_meas.uptimeS >= g_faultNextRetryS) {
-          g_faultRetryCount++;
+          g_faultRetryCount++;     // bu retry denenecek
           g_faultNextRetryS = 0;
 
           notify("🧯 FAULT: Auto-retry #" + String(g_faultRetryCount) + " başlıyor");
@@ -919,8 +929,6 @@ static void autoTick_1s() {
         }
       }
     }
-
-    // FAULT'ta kal
     return;
   }
 
@@ -1041,7 +1049,7 @@ static void autoTick_1s() {
 }
 
 // =====================
-// Boot Report
+// Boot Report / Status
 // =====================
 static String buildBootReport() {
   String s;
@@ -1057,39 +1065,10 @@ static String buildBootReport() {
   return s;
 }
 
-// =====================
-// Telegram auth
-// =====================
 static bool isAuthorized(const telegramMessage& msg) {
   if (msg.chat_id == String(CHAT_ID)) return true;
   long fromId = msg.from_id.toInt();
   return (fromId == MASTER_ADMIN_ID);
-}
-
-static void handleManualStart(const String& chatId) {
-  if (g_mode == MODE_AUTO) {
-    bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", "");
-    return;
-  }
-  if (g_startSeq.active || g_stopSeq.active) {
-    bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", "");
-    return;
-  }
-  startSeqBegin(true);
-  bot.sendMessage(chatId, "🟡 MANUAL: Start sekansı başladı.", "");
-}
-
-static void handleManualStop(const String& chatId) {
-  if (g_mode == MODE_AUTO) {
-    bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", "");
-    return;
-  }
-  if (g_startSeq.active || g_stopSeq.active) {
-    bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", "");
-    return;
-  }
-  stopSeqBegin(true);
-  bot.sendMessage(chatId, "🟥 MANUAL: Stop sekansı başladı.", "");
 }
 
 static String buildStatusText() {
@@ -1097,14 +1076,33 @@ static String buildStatusText() {
   s += "⛽ Fuel=" + String(g_fuelOn ? "ON" : "OFF") + "\n";
   s += "🟡 StartSeq=" + String(g_startSeq.active ? "ACTIVE" : "IDLE") + "\n";
   s += "🟥 StopSeq=" + String(g_stopSeq.active ? "ACTIVE" : "IDLE") + "\n";
+
   if (g_autoState == AutoState::FAULT) {
     s += "🧯 FaultRetry=" + String(g_faultRetryCount) + "/" + String(g_set.faultMaxRetries) + "\n";
     if (g_faultNextRetryS) {
       uint32_t left = (g_meas.uptimeS >= g_faultNextRetryS) ? 0 : (g_faultNextRetryS - g_meas.uptimeS);
-      s += "⏳ NextRetry=" + String(left) + "s\n";
+      s += "⏳ NextRetry=" + fmtDurTR(left) + "\n";
     }
+    s += "📌 Backoff Plan: " + buildBackoffPlanText(g_faultRetryCount) + "\n";
   }
   return s;
+}
+
+// =====================
+// Telegram
+// =====================
+static void handleManualStart(const String& chatId) {
+  if (g_mode == MODE_AUTO) { bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", ""); return; }
+  if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
+  startSeqBegin(true);
+  bot.sendMessage(chatId, "🟡 MANUAL: Start sekansı başladı.", "");
+}
+
+static void handleManualStop(const String& chatId) {
+  if (g_mode == MODE_AUTO) { bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", ""); return; }
+  if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
+  stopSeqBegin(true);
+  bot.sendMessage(chatId, "🟥 MANUAL: Stop sekansı başladı.", "");
 }
 
 static void handleTelegram() {
@@ -1185,7 +1183,7 @@ static void handleTelegram() {
 }
 
 // =====================
-// Measure (MAINS + GEN + BATT)
+// Measure
 // =====================
 static void readAllMeasurements() {
   g_meas.wifiRssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
@@ -1285,13 +1283,6 @@ void loop() {
     updateBatteryStatesOnly();
     handleStateAlerts();
     updateGenHoursCounter_1s();
-
-    // STARTING/STOPPING sonuçlarına göre FAULT’a düşürmek:
-    // (AUTO state makinesi start/stop bittiyse burada tetikliyor)
-    // Not: autoTick_1s içinde start/stop başarısızsa enterFaultWithSchedule yerine enterFaultWithSchedule() çağırmıyoruz;
-    // bu sürümde STARTING/STOPPING başarısızlıklarında aşağıdaki enterFaultWithSchedule kullanılmalı.
-    // Kolay yol: STARTING/STOPPING kontrolü autoTick_1s içinde zaten var ama enterFaultWithSchedule gerekiyordu.
-    // Bu yüzden autoTick_1s'i çağırmadan önce g_meas güncel olsun yeter.
     autoTick_1s();
   }
 
