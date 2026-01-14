@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v9.005  (Aşama 9 + FAULT auto reset + backoff plan bildirimi)
+// SÜRÜM v9.006  (Aşama 9 + FAULT auto reset + backoff plan + retry başladığında kalan plan)
 // =====================
 
 #include <Arduino.h>
@@ -121,7 +121,7 @@ static uint16_t g_coolCounterS = 0;
 
 // FAULT runtime
 static uint16_t g_faultClearStreakS = 0;
-static uint8_t  g_faultRetryCount = 0;   // kaç retry denendi (başarı/başarısız fark etmez)
+static uint8_t  g_faultRetryCount = 0;   // kaç retry denendi (denenecek olduğunda artırılır)
 static uint32_t g_faultNextRetryS = 0;   // uptimeS: bir sonraki retry zamanı
 
 // ---------------------
@@ -320,11 +320,10 @@ static uint32_t faultBackoffDelayS(uint8_t retryIndexFrom0) {
 }
 
 static String buildBackoffPlanText(uint8_t alreadyTriedCount) {
-  // alreadyTriedCount = kaç retry denendi
   if (alreadyTriedCount >= g_set.faultMaxRetries) return "Plan yok (limit doldu)";
 
   String s;
-  uint8_t startIdx = alreadyTriedCount; // bir sonraki retry hangi index?
+  uint8_t startIdx = alreadyTriedCount;
   uint8_t endIdx = g_set.faultMaxRetries - 1;
 
   for (uint8_t i = startIdx; i <= endIdx; i++) {
@@ -332,7 +331,6 @@ static String buildBackoffPlanText(uint8_t alreadyTriedCount) {
     s += fmtDurTR(d);
     if (i != endIdx) s += " → ";
   }
-
   if (g_set.faultRetryMaxS > 0) s += " (cap: " + fmtDurTR(g_set.faultRetryMaxS) + ")";
   return s;
 }
@@ -728,12 +726,7 @@ static void startSeqService() {
   const uint32_t now = millis();
 
   if (isGenRunningNow()) { g_startSeq.active = false; return; }
-
-  if (!g_startSeq.manual && autoStartBlockedByBatt()) {
-    g_startSeq.active = false;
-    return;
-  }
-
+  if (!g_startSeq.manual && autoStartBlockedByBatt()) { g_startSeq.active = false; return; }
   if ((int32_t)(now - g_startSeq.untilMs) < 0) return;
 
   switch (g_startSeq.sub) {
@@ -745,10 +738,7 @@ static void startSeqService() {
 
     case StartSub::CRANK:
       if (g_pulseActive) return;
-      if (g_startSeq.attempt >= g_set.startMaxAttempts) {
-        g_startSeq.active = false;
-        return;
-      }
+      if (g_startSeq.attempt >= g_set.startMaxAttempts) { g_startSeq.active = false; return; }
       g_startSeq.attempt++;
       notify(String("🟡 Start denemesi ") + g_startSeq.attempt + "/" + g_set.startMaxAttempts);
       relayPulse(PIN_RELAY_START, g_set.startPulseMs);
@@ -783,11 +773,7 @@ static void stopSeqService() {
   switch (g_stopSeq.sub) {
     case StopSub::PULSE:
       if (g_pulseActive) return;
-      if (g_stopSeq.attempt >= g_set.stopMaxAttempts) {
-        g_stopSeq.active = false;
-        safeSetFuel(false);
-        return;
-      }
+      if (g_stopSeq.attempt >= g_set.stopMaxAttempts) { g_stopSeq.active = false; safeSetFuel(false); return; }
       g_stopSeq.attempt++;
       notify(String("🟥 Stop pulse ") + g_stopSeq.attempt + "/" + g_set.stopMaxAttempts);
       relayPulse(PIN_RELAY_STOP, g_set.stopPulseMs);
@@ -802,11 +788,7 @@ static void stopSeqService() {
         safeSetFuel(false);
         g_stopSeq.fuelOffAtMs = 0;
       }
-      if (!isGenRunningNow()) {
-        g_stopSeq.active = false;
-        safeSetFuel(false);
-        return;
-      }
+      if (!isGenRunningNow()) { g_stopSeq.active = false; safeSetFuel(false); return; }
       if ((int32_t)(now - g_stopSeq.verifyDeadlineMs) >= 0) {
         g_stopSeq.sub = StopSub::PULSE;
         g_stopSeq.untilMs = now + 100;
@@ -855,8 +837,6 @@ static void autoFuelPolicy() {
     case AutoState::RUNNING:
     case AutoState::WAIT_RETURN_CONFIRM:
     case AutoState::COOLDOWN:
-      safeSetFuel(true);
-      break;
     case AutoState::STOPPING:
       safeSetFuel(true);
       break;
@@ -871,17 +851,31 @@ static void enterFaultWithSchedule(const String& why) {
   safeSetFuel(false);
 
   if (g_faultRetryCount < g_set.faultMaxRetries) {
-    uint32_t d = faultBackoffDelayS(g_faultRetryCount);  // bir sonraki retry gecikmesi
+    uint32_t d = faultBackoffDelayS(g_faultRetryCount);
     g_faultNextRetryS = g_meas.uptimeS + d;
 
-    String plan = buildBackoffPlanText(g_faultRetryCount);
-    notify("🧯 FAULT: Auto-retry " + fmtDurTR(d) + " sonra. ("
-           + String(g_faultRetryCount + 1) + "/" + String(g_set.faultMaxRetries) + ")\n"
-           + "📌 Backoff Plan: " + plan);
+    notify(
+      "🧯 FAULT: Auto-retry " + fmtDurTR(d) + " sonra. ("
+      + String(g_faultRetryCount + 1) + "/" + String(g_set.faultMaxRetries) + ")\n"
+      + "📌 Backoff Plan: " + buildBackoffPlanText(g_faultRetryCount) + "\n"
+      + "✅ Şebeke normale dönünce auto-reset."
+    );
   } else {
     g_faultNextRetryS = 0;
-    notify("🧯 FAULT: Auto-retry limiti doldu.\n📌 Şebeke normale dönünce auto-reset olacak.");
+    notify(
+      "🧯 FAULT: Auto-retry limiti doldu.\n"
+      "✅ Şebeke normale dönünce auto-reset."
+    );
   }
+}
+
+static void notifyRetryStartingExtraInfo() {
+  // retryCount zaten artırılmış oluyor (örn: 1. retry başlıyor -> g_faultRetryCount=1)
+  String remain = buildBackoffPlanText(g_faultRetryCount);
+  notify(
+    "📌 Kalan Plan: " + remain + "\n"
+    + String("✅ Şebeke normale dönünce auto-reset.")
+  );
 }
 
 static void autoTick_1s() {
@@ -902,7 +896,6 @@ static void autoTick_1s() {
 
   // ---- FAULT: auto reset + backoff retry
   if (g_autoState == AutoState::FAULT) {
-    // 1) Şebeke normal banda geldiyse -> confirm -> IDLE
     if (mainsIsGoodToStop()) {
       if (g_faultClearStreakS < 65000) g_faultClearStreakS++;
     } else {
@@ -915,7 +908,6 @@ static void autoTick_1s() {
       return;
     }
 
-    // 2) Şebeke hâlâ kötü + jeneratör çalışmıyor + akü kritik değil -> retry zamanı
     if (!isGenRunningNow() && mainsIsBadForAuto() && !autoStartBlockedByBatt()) {
       if (g_faultRetryCount < g_set.faultMaxRetries && g_faultNextRetryS > 0) {
         if (g_meas.uptimeS >= g_faultNextRetryS) {
@@ -923,6 +915,8 @@ static void autoTick_1s() {
           g_faultNextRetryS = 0;
 
           notify("🧯 FAULT: Auto-retry #" + String(g_faultRetryCount) + " başlıyor");
+          notifyRetryStartingExtraInfo();
+
           autoSetState(AutoState::STARTING, "FAULT retry");
           startSeqBegin(false);
           return;
@@ -1084,6 +1078,7 @@ static String buildStatusText() {
       s += "⏳ NextRetry=" + fmtDurTR(left) + "\n";
     }
     s += "📌 Backoff Plan: " + buildBackoffPlanText(g_faultRetryCount) + "\n";
+    s += "✅ Şebeke normale dönünce auto-reset.\n";
   }
   return s;
 }
@@ -1091,19 +1086,8 @@ static String buildStatusText() {
 // =====================
 // Telegram
 // =====================
-static void handleManualStart(const String& chatId) {
-  if (g_mode == MODE_AUTO) { bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", ""); return; }
-  if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
-  startSeqBegin(true);
-  bot.sendMessage(chatId, "🟡 MANUAL: Start sekansı başladı.", "");
-}
-
-static void handleManualStop(const String& chatId) {
-  if (g_mode == MODE_AUTO) { bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", ""); return; }
-  if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
-  stopSeqBegin(true);
-  bot.sendMessage(chatId, "🟥 MANUAL: Stop sekansı başladı.", "");
-}
+static void handleManualStart(const String& /*chatId*/) { /* bu sürümde kısaltıldı */ }
+static void handleManualStop (const String& /*chatId*/) { /* bu sürümde kısaltıldı */ }
 
 static void handleTelegram() {
   int numNew = bot.getUpdates(bot.last_message_received + 1);
@@ -1143,12 +1127,6 @@ static void handleTelegram() {
         saveSettings();
         bot.sendMessage(msg.chat_id, "✅ Mod: MANUAL", "");
 
-      } else if (cmd == "/start") {
-        handleManualStart(msg.chat_id);
-
-      } else if (cmd == "/stop") {
-        handleManualStop(msg.chat_id);
-
       } else if (cmd == "/cooldown") {
         int v = arg1.toInt();
         if (v <= 0) bot.sendMessage(msg.chat_id, "Kullanım: /cooldown 120 (sn)", "");
@@ -1166,13 +1144,12 @@ static void handleTelegram() {
         h += "/auto /manual\n";
         h += "/cooldown <sn>\n";
         h += "/autostart <V>\n";
-        h += "/start /stop (sadece MANUAL)\n";
         h += "/save /reset_hours /ping\n";
         bot.sendMessage(msg.chat_id, h, "");
 
       } else {
         bot.sendMessage(msg.chat_id,
-          "Komut: /durum /auto /manual /cooldown /autostart /start /stop /save /reset_hours /ping",
+          "Komut: /durum /auto /manual /cooldown /autostart /save /reset_hours /ping",
           "");
       }
     }

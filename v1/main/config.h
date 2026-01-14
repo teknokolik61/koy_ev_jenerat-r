@@ -1,5 +1,5 @@
 // =====================
-// config.h (v9.005 - LOW aktif röle + Backoff plan bildirimi)
+// config.h (v9.006 - LOW aktif röle + Backoff plan + retry info)
 // =====================
 #pragma once
 #include <stdint.h>
@@ -9,7 +9,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v9.005"
+#define PROJECT_VERSION "v9.006"
 
 // =====================
 // Cihaz Adı
@@ -46,14 +46,12 @@ inline constexpr uint8_t PIN_BTN_SAVE = 27;
 // =====================
 // Stage 9 - Relay Control (LOW aktif)
 // =====================
-// Donanım testine kadar 0 bırak
 #define ENABLE_RELAY_CONTROL 0
 
 inline constexpr uint8_t PIN_RELAY_FUEL  = 23;
 inline constexpr uint8_t PIN_RELAY_START = 25;
 inline constexpr uint8_t PIN_RELAY_STOP  = 26;
 
-// Röleler LOW aktif
 inline constexpr uint8_t RELAY_ACTIVE_LEVEL = LOW;
 inline constexpr uint8_t RELAY_IDLE_LEVEL   = HIGH;
 
@@ -151,7 +149,6 @@ inline constexpr bool AUTO_BLOCK_ON_BATT_CRIT = true;
 // =====================
 // FAULT exponential backoff retry
 // =====================
-// Delay = BASE * 2^(retryIndexFrom0), cap = MAX
 inline constexpr uint8_t  FAULT_MAX_RETRIES   = 3;     // 3 deneme: 3dk -> 6dk -> 12dk
 inline constexpr uint16_t FAULT_RETRY_BASE_S  = 180;   // 3 dk
 inline constexpr uint16_t FAULT_RETRY_MAX_S   = 1800;  // 30 dk cap
