@@ -1,5 +1,5 @@
 // =====================
-// SÜRÜM v4.001
+// SÜRÜM v5.001
 // =====================
 
 #include <Arduino.h>
@@ -25,18 +25,18 @@ RunMode g_mode = MODE_MANUAL;
 struct Settings {
   float calMains, calGen, genBattDiv, camBattDiv;
 
-  // MAINS thresholds
   float mainsHigh, mainsNormMin, mainsNormMax, mainsLow, mainsCrit;
-
-  // GEN thresholds
   float genOff, genLow, genNormMin, genNormMax;
 
-  // BATT thresholds
   float battHigh, battNormMin, battLow, battCrit;
 
-  // hysteresis
   float hystAc;
   float hystBatt;
+
+  // Stage 5
+  float genRunningV;
+  uint16_t genRunConfirmS;
+  uint32_t hoursSavePeriodS;
 } g_set;
 
 struct Measurements {
@@ -67,6 +67,14 @@ static bool g_genLatched = false;
 static bool g_genBattLatched = false;
 static bool g_camBattLatched = false;
 
+// ---------------------
+// Stage 5 - Hours Counter
+// ---------------------
+static bool     g_genRunning = false;
+static uint16_t g_genRunStreakS = 0;      // kaç saniyedir üst üste çalışıyor
+static uint64_t g_genRunTotalS  = 0;      // toplam çalışma süresi (saniye)
+static uint32_t g_lastHoursSaveS = 0;     // son NVS yazma zamanı (uptime saniye)
+
 // =====================
 // Helpers
 // =====================
@@ -75,6 +83,12 @@ static String fmt2(float v) {
   char b[16];
   dtostrf(v, 0, 2, b);
   return String(b);
+}
+static String fmtHMS(uint64_t totalS) {
+  uint64_t h = totalS / 3600ULL;
+  uint64_t m = (totalS % 3600ULL) / 60ULL;
+  uint64_t s = totalS % 60ULL;
+  return String((unsigned long)h) + "h " + String((unsigned long)m) + "m " + String((unsigned long)s) + "s";
 }
 
 static float lpf(float prev, float x, float a) {
@@ -113,7 +127,18 @@ static void loadSettings() {
   g_set.hystAc       = prefs.getFloat("hAc",  HYST_V_AC);
   g_set.hystBatt     = prefs.getFloat("hBt",  HYST_V_BATT);
 
+  // Stage 5
+  g_set.genRunningV      = prefs.getFloat("gRunV", GEN_RUNNING_V);
+  g_set.genRunConfirmS   = prefs.getUShort("gRunC", GEN_RUNNING_CONFIRM_S);
+  g_set.hoursSavePeriodS = prefs.getUInt("hSaveP", HOURS_SAVE_PERIOD_S);
+
   g_mode = (RunMode)prefs.getUChar("mode", (uint8_t)MODE_MANUAL);
+
+  // total hours load
+  // uint64_t yerine iki parça saklayalım (esp32 prefs 64-bit desteklese de garanti olsun)
+  uint32_t lo = prefs.getUInt("hrsLo", 0);
+  uint32_t hi = prefs.getUInt("hrsHi", 0);
+  g_genRunTotalS = ((uint64_t)hi << 32) | (uint64_t)lo;
 }
 
 static void saveSettings() {
@@ -141,7 +166,19 @@ static void saveSettings() {
   prefs.putFloat("hAc",  g_set.hystAc);
   prefs.putFloat("hBt",  g_set.hystBatt);
 
+  // Stage 5
+  prefs.putFloat("gRunV", g_set.genRunningV);
+  prefs.putUShort("gRunC", g_set.genRunConfirmS);
+  prefs.putUInt("hSaveP", g_set.hoursSavePeriodS);
+
   prefs.putUChar("mode", (uint8_t)g_mode);
+}
+
+static void saveHoursTotal() {
+  uint32_t lo = (uint32_t)(g_genRunTotalS & 0xFFFFFFFFULL);
+  uint32_t hi = (uint32_t)(g_genRunTotalS >> 32);
+  prefs.putUInt("hrsLo", lo);
+  prefs.putUInt("hrsHi", hi);
 }
 
 static void connectWiFi() {
@@ -190,14 +227,13 @@ static float readAcRmsApprox(uint8_t pin, float calScale) {
   return vrms;
 }
 
-// UniversalTelegramBot struct adı telegramMessage
 static bool isAuthorized(const telegramMessage& msg) {
   long fromId = msg.from_id.toInt();
   return (fromId == MASTER_ADMIN_ID);
 }
 
 // ---------------------
-// State Text
+// Battery state
 // ---------------------
 static String battStateToText(BattState st) {
   switch (st) {
@@ -209,9 +245,6 @@ static String battStateToText(BattState st) {
   }
 }
 
-// ---------------------
-// Battery State Eval (histerezisli)
-// ---------------------
 static BattState evalBatt(float v, BattState prev) {
   float h = g_set.hystBatt;
 
@@ -244,7 +277,6 @@ static BattState evalBatt(float v, BattState prev) {
 }
 
 static void handleBatteryNotifications() {
-  // GEN batt
   BattState newGB = evalBatt(g_meas.genBattV, g_genBattState);
   if (newGB != g_genBattState) { g_genBattState = newGB; g_genBattLatched = false; }
   if (!g_genBattLatched) {
@@ -255,7 +287,6 @@ static void handleBatteryNotifications() {
     else if (g_genBattState == BattState::NORMAL) notify("✅ Gen Akü NORMAL: " + fmt2(g_meas.genBattV) + "V");
   }
 
-  // CAM batt
   BattState newCB = evalBatt(g_meas.camBattV, g_camBattState);
   if (newCB != g_camBattState) { g_camBattState = newCB; g_camBattLatched = false; }
   if (!g_camBattLatched) {
@@ -268,16 +299,59 @@ static void handleBatteryNotifications() {
 }
 
 // ---------------------
-// Telegram (safe loop)
+// Stage 5 - running detect + total seconds
 // ---------------------
+static void updateGenHoursCounter() {
+  // genV burada okunmuyor ise, daha önceki aşamalarda okunduğunu varsaymak yerine:
+  // Bu sürümde genV ölçümünü de tekrar okuyacağız (tek yerden yönetmek daha doğru).
+  // Not: aşağıda readAllMeasurements() içinde genV okuyoruz.
+
+  bool above = (g_meas.genV >= g_set.genRunningV);
+
+  if (above) {
+    if (g_genRunStreakS < 65000) g_genRunStreakS++;
+  } else {
+    g_genRunStreakS = 0;
+    g_genRunning = false;
+  }
+
+  if (!g_genRunning && g_genRunStreakS >= g_set.genRunConfirmS) {
+    g_genRunning = true;
+    notify("▶️ Jeneratör ÇALIŞIYOR (sayaç başladı)");
+  }
+
+  if (g_genRunning) {
+    // her MEASURE_MS (1 sn) geldiğimizde +1 sn
+    g_genRunTotalS += 1;
+
+    // voltaj düştüyse durdur
+    if (!above) {
+      g_genRunning = false;
+      notify("⏹️ Jeneratör DURDU (sayaç durdu)");
+    }
+  }
+
+  // periyodik NVS kaydı
+  if (g_meas.uptimeS - g_lastHoursSaveS >= g_set.hoursSavePeriodS) {
+    g_lastHoursSaveS = g_meas.uptimeS;
+    saveHoursTotal();
+  }
+}
+
 static String buildStatusText() {
   String s;
   s += "📌 Köy Jeneratör Proje-3\n";
   s += String("🔖 Sürüm: ") + PROJECT_VERSION + "\n";
   s += String("⏱ Uptime: ") + String(g_meas.uptimeS) + " sn\n";
   s += String("📶 RSSI: ") + String(g_meas.wifiRssi) + " dBm\n\n";
+
+  s += "🟠 Gen V: " + fmt2(g_meas.genV) + " V\n";
   s += "🔋 Gen Akü: " + fmt2(g_meas.genBattV) + " V (" + battStateToText(g_genBattState) + ")\n";
-  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V (" + battStateToText(g_camBattState) + ")\n";
+  s += "🔋 Cam Akü: " + fmt2(g_meas.camBattV) + " V (" + battStateToText(g_camBattState) + ")\n\n";
+
+  s += "⏱ Çalışma Süresi: " + fmtHMS(g_genRunTotalS) + "\n";
+  s += String("▶️ Running: ") + (g_genRunning ? "YES" : "NO") + "\n";
+
   return s;
 }
 
@@ -297,9 +371,14 @@ static void handleTelegram() {
         bot.sendMessage(msg.chat_id, buildStatusText(), "");
       } else if (text == "/save") {
         saveSettings();
-        bot.sendMessage(msg.chat_id, "✅ Ayarlar NVS'ye kaydedildi.", "");
+        saveHoursTotal();
+        bot.sendMessage(msg.chat_id, "✅ Ayarlar + sayaç NVS'ye kaydedildi.", "");
+      } else if (text == "/reset_hours") {
+        g_genRunTotalS = 0;
+        saveHoursTotal();
+        bot.sendMessage(msg.chat_id, "✅ Çalışma saati sıfırlandı.", "");
       } else {
-        bot.sendMessage(msg.chat_id, "Komut: /durum /save", "");
+        bot.sendMessage(msg.chat_id, "Komut: /durum /save /reset_hours", "");
       }
     }
 
@@ -309,12 +388,17 @@ static void handleTelegram() {
 }
 
 // ---------------------
-// Measure
+// Measure (genV + batt)
 // ---------------------
 static void readAllMeasurements() {
   g_meas.wifiRssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
   g_meas.uptimeS  = millis() / 1000;
 
+  // GEN AC voltajı
+  g_meas.genV_raw = readAcRmsApprox(PIN_ADC_GEN, g_set.calGen);
+  g_meas.genV     = lpf(g_meas.genV, g_meas.genV_raw, LPF_ALPHA_AC);
+
+  // Batarya
   float vGenAdc = readAdcVoltage(PIN_ADC_GEN_BATT);
   float vCamAdc = readAdcVoltage(PIN_ADC_CAM_BATT);
 
@@ -338,7 +422,8 @@ static void handleSaveButton() {
     uint32_t held = now - btnDownMs;
     if (held >= 800) {
       saveSettings();
-      notify("💾 Buton: Ayarlar NVS'ye kaydedildi.");
+      saveHoursTotal();
+      notify("💾 Buton: Ayarlar + sayaç NVS'ye kaydedildi.");
     }
   }
   lastBtn = btn;
@@ -362,6 +447,8 @@ void setup() {
   tMeasure = millis();
   tSerial  = millis();
   tTgPoll  = millis();
+
+  g_lastHoursSaveS = g_meas.uptimeS;
 }
 
 void loop() {
@@ -380,18 +467,23 @@ void loop() {
   if (now - tMeasure >= MEASURE_MS) {
     tMeasure = now;
     readAllMeasurements();
+
+    // Aşama 4
     handleBatteryNotifications();
+
+    // Aşama 5
+    updateGenHoursCounter();
   }
 
   if (now - tSerial >= SERIAL_REPORT_MS) {
     tSerial = now;
     Serial.print("["); Serial.print(PROJECT_VERSION); Serial.print("] ");
-    Serial.print("GenBatt="); Serial.print(fmt2(g_meas.genBattV));
-    Serial.print(" ("); Serial.print(battStateToText(g_genBattState)); Serial.print(")");
+    Serial.print("GenV="); Serial.print(fmt2(g_meas.genV));
+    Serial.print(" GenBatt="); Serial.print(fmt2(g_meas.genBattV));
     Serial.print(" CamBatt="); Serial.print(fmt2(g_meas.camBattV));
-    Serial.print(" ("); Serial.print(battStateToText(g_camBattState)); Serial.print(")");
-    Serial.print(" RSSI="); Serial.print(g_meas.wifiRssi);
-    Serial.println("dBm");
+    Serial.print(" Run="); Serial.print(g_genRunning ? "YES" : "NO");
+    Serial.print(" Total="); Serial.print(fmtHMS(g_genRunTotalS));
+    Serial.println();
   }
 
   if (now - tTgPoll >= TG_POLL_MS) {

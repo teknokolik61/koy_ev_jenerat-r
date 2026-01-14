@@ -4,7 +4,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v4.001"
+#define PROJECT_VERSION "v5.001"
 
 // =====================
 // Serial
@@ -71,7 +71,7 @@ inline constexpr uint16_t AC_SAMPLES  = 800;
 inline constexpr uint16_t AC_US_DELAY = 200;
 
 // =====================
-// Thresholds - MAINS/GEN (Aşama 3)
+// Thresholds - MAINS/GEN (Stage 3)
 // =====================
 inline constexpr float MAINS_HIGH_V     = 245.0f;
 inline constexpr float MAINS_NORMAL_MIN = 210.0f;
@@ -85,14 +85,27 @@ inline constexpr float GEN_NORMAL_MIN   = 210.0f;
 inline constexpr float GEN_NORMAL_MAX   = 240.0f;
 
 // =====================
-// Thresholds - BATTERY (Aşama 4)
+// Thresholds - BATTERY (Stage 4)
 // =====================
-// 12V kurşun-asit için makul başlangıç değerleri (NVS ile değişebilir)
 inline constexpr float BATT_HIGH_V     = 13.2f;
 inline constexpr float BATT_NORMAL_MIN = 12.2f;
 inline constexpr float BATT_LOW_V      = 11.8f;
 inline constexpr float BATT_CRIT_V     = 11.2f;
 
-// Histerezis
+// =====================
+// Hysteresis
+// =====================
 inline constexpr float HYST_V_AC   = 5.0f;
 inline constexpr float HYST_V_BATT = 0.15f;
+
+// =====================
+// Stage 5 - Çalışma Saat Sayacı
+// =====================
+// Jeneratör "çalışıyor" sayılması için voltaj eşiği
+inline constexpr float GEN_RUNNING_V = 160.0f;
+
+// False trigger engeli: en az kaç saniye üst üste çalışıyor olmalı
+inline constexpr uint16_t GEN_RUNNING_CONFIRM_S = 10;
+
+// NVS'ye çalışma süresi kaç saniyede bir yazılsın
+inline constexpr uint32_t HOURS_SAVE_PERIOD_S = 60;
