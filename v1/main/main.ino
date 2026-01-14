@@ -1,7 +1,8 @@
 // =====================
-// SÜRÜM v9.009
+// SÜRÜM v9.010
 // /start: jeneratör zaten çalışıyorsa sekans başlatma + mesaj
 // /stop : jeneratör zaten durmuşsa sekans başlatma + mesaj
+//        + eğer fuel ON kalmışsa fuel OFF yap + mesaj
 // =====================
 
 #include <Arduino.h>
@@ -1076,8 +1077,18 @@ static void handleManualStart(const String& chatId) {
 
 static void handleManualStop(const String& chatId) {
   if (g_mode == MODE_AUTO) { bot.sendMessage(chatId, "⚠️ Şu an AUTO modda. Önce /manual yap.", ""); return; }
-  if (!isGenRunningNow())  { bot.sendMessage(chatId, "✅ Jeneratör zaten durmuş. Stop yapılmadı.", ""); return; } // ✅ eklendi
   if (g_startSeq.active || g_stopSeq.active) { bot.sendMessage(chatId, "⏳ Başka bir işlem aktif (start/stop).", ""); return; }
+
+  // ✅ Rötuş: jeneratör zaten durmuşsa stop başlatma, fuel ON ise fuel OFF yapıp haber ver
+  if (!isGenRunningNow()) {
+    if (g_fuelOn) {
+      safeSetFuel(false);
+      bot.sendMessage(chatId, "✅ Jeneratör zaten durmuş. ⛽ Fuel OFF yapıldı. Stop yapılmadı.", "");
+    } else {
+      bot.sendMessage(chatId, "✅ Jeneratör zaten durmuş. Stop yapılmadı.", "");
+    }
+    return;
+  }
 
   stopSeqBegin(true);
   bot.sendMessage(chatId, "🟥 MANUAL: Stop sekansı başladı.", "");
@@ -1276,14 +1287,6 @@ void loop() {
     Serial.print("Mode="); Serial.print(modeText(g_mode));
     Serial.print(" Auto="); Serial.print(autoStateText(g_autoState));
     Serial.print(" Fuel="); Serial.print(g_fuelOn ? "ON" : "OFF");
-    if (g_autoState == AutoState::FAULT) {
-      Serial.print(" FaultRetry="); Serial.print(g_faultRetryCount);
-      Serial.print("/"); Serial.print(g_set.faultMaxRetries);
-      if (g_faultNextRetryS) {
-        uint32_t left = (g_meas.uptimeS >= g_faultNextRetryS) ? 0 : (g_faultNextRetryS - g_meas.uptimeS);
-        Serial.print(" Next="); Serial.print(left); Serial.print("s");
-      }
-    }
     Serial.print(" Mains="); Serial.print(fmt2(g_meas.mainsV));
     Serial.print(" Gen="); Serial.print(fmt2(g_meas.genV));
     Serial.print(" RunNow="); Serial.print(isGenRunningNow() ? "YES" : "NO");

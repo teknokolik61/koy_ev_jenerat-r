@@ -1,5 +1,5 @@
 // =====================
-// config.h (v9.009)
+// config.h (v9.010)
 // =====================
 #pragma once
 #include <stdint.h>
@@ -9,7 +9,7 @@
 // =====================
 // SÜRÜM
 // =====================
-#define PROJECT_VERSION "v9.009"
+#define PROJECT_VERSION "v9.010"
 
 // =====================
 // Cihaz Adı
